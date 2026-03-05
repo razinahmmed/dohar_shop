@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "150383526161",
+    "project_id": "dohar-sho",
+    "storage_bucket": "dohar-sho.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:150383526161:android:cd234c8b1c4f50f5790cb0",
+        "android_client_info": {
+          "package_name": "com.example.dohar_shop"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCdZq-NFIGelxiLb68ZtMRfX2Y7kJsKKXA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
