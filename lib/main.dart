@@ -8,6 +8,15 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'firebase_options.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart'; // একদম উপরে বসান
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -410,6 +419,28 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     else { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Item flying to Cart! 🚀'), duration: Duration(seconds: 1))); }
   }
 
+  // কাস্টমার কোনো প্রোডাক্ট দেখলে তা ফায়ারবেসে 'recently_viewed' এ সেভ করে রাখা
+  void _saveToRecentlyViewed() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    var recentRef = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('recently_viewed');
+    
+    // প্রোডাক্টটি আগে থেকেই দেখা থাকলে তার সময় আপডেট করা, নাহলে নতুন করে সেভ করা
+    await recentRef.doc(widget.product.id).set({
+      'product_id': widget.product.id,
+      'category': widget.product['category'],
+      'viewed_at': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // পেজ ওপেন হওয়ার সাথে সাথেই এটি 'Recently Viewed' হিসেবে সেভ হয়ে যাবে
+    _saveToRecentlyViewed(); 
+  }
+
   @override
   Widget build(BuildContext context) {
     Map<String, dynamic> data = widget.product.data() as Map<String, dynamic>;
@@ -440,7 +471,38 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
       appBar: AppBar(
         backgroundColor: Colors.white, elevation: 0,
         leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.black, size: 20), onPressed: () => Navigator.pop(context)),
-        actions:[IconButton(icon: const Icon(Icons.share, color: Colors.black), onPressed: () {}), IconButton(key: _cartKey, icon: const Icon(Icons.shopping_cart_outlined, color: Colors.black), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const CartPage())))],
+        actions:[
+          // উইশলিস্ট (হার্ট) বাটন (Magic Logic)
+          StreamBuilder<DocumentSnapshot>(
+            stream: FirebaseFirestore.instance.collection('users').doc(FirebaseAuth.instance.currentUser!.uid).collection('wishlist').doc(widget.product.id).snapshots(),
+            builder: (context, snapshot) {
+              bool isWished = snapshot.hasData && snapshot.data!.exists;
+              return IconButton(
+                icon: Icon(isWished ? Icons.favorite : Icons.favorite_border, color: isWished ? Colors.red : Colors.black),
+                onPressed: () async {
+                  User? user = FirebaseAuth.instance.currentUser;
+                  if (user == null) return;
+                  
+                  var ref = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('wishlist').doc(widget.product.id);
+                  if (isWished) {
+                    await ref.delete();
+                    if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Removed from Wishlist 💔')));
+                  } else {
+                    // প্রোডাক্টের পুরো ডাটা উইশলিস্টে সেভ করে রাখছি
+                    await ref.set(widget.product.data() as Map<String, dynamic>); 
+                    if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Added to Wishlist ❤️')));
+                  }
+                },
+              );
+            },
+          ),
+          IconButton(icon: const Icon(Icons.share, color: Colors.black), onPressed: () {}), 
+          IconButton(
+            key: _cartKey, 
+            icon: const Icon(Icons.shopping_cart_outlined, color: Colors.black), 
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const CartPage()))
+          )
+        ],
       ),
       body: Column(
         children:[
@@ -627,7 +689,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
 }
 
 // ==========================================
-// ২ নম্বর পেজ: Home Page (Responsive UI + Category Filter)
+// ২ নম্বর পেজ: Home Page (Ultra Smart Recommendation Engine)
 // ==========================================
 class ShopeeHome extends StatefulWidget {
   const ShopeeHome({super.key});
@@ -638,35 +700,39 @@ class ShopeeHome extends StatefulWidget {
 
 class _ShopeeHomeState extends State<ShopeeHome> {
   String searchQuery = '';
-  String selectedCategoryFilter = ''; // <--- কোন ক্যাটাগরি সিলেক্ট করা হয়েছে তা মনে রাখার জন্য
+  String selectedCategoryFilter = ''; 
   final TextEditingController searchController = TextEditingController();
 
   final List<Map<String, dynamic>> staticCategories =[
-    {'name': 'Fashion', 'icon': Icons.checkroom}, {'name': 'Electronics', 'icon': Icons.tv},
-    {'name': 'Mobiles', 'icon': Icons.phone_android}, {'name': 'Home Decor', 'icon': Icons.chair},
-    {'name': 'Beauty', 'icon': Icons.face}, {'name': 'Watches', 'icon': Icons.watch},
-    {'name': 'Baby & Toys', 'icon': Icons.child_care}, {'name': 'Groceries', 'icon': Icons.local_grocery_store},
-    {'name': 'Automotive', 'icon': Icons.directions_car}, {'name': 'Women\'s Bags', 'icon': Icons.shopping_bag},
-    {'name': 'Men\'s Wallets', 'icon': Icons.account_balance_wallet}, {'name': 'Muslim Fashion', 'icon': Icons.mosque},
-    {'name': 'Games & Hobbies', 'icon': Icons.sports_esports}, {'name': 'Computers', 'icon': Icons.computer},
-    {'name': 'Sports & Outdoor', 'icon': Icons.sports_soccer}, {'name': 'Men Shoes', 'icon': Icons.snowshoeing},
-    {'name': 'Cameras', 'icon': Icons.camera_alt}, {'name': 'Travel & Luggage', 'icon': Icons.luggage},
+    {'name': 'Fashion', 'icon': Icons.checkroom, 'color': Colors.pink}, 
+    {'name': 'Electronics', 'icon': Icons.tv, 'color': Colors.blue},
+    {'name': 'Mobiles', 'icon': Icons.smartphone, 'color': Colors.green}, 
+    {'name': 'Home Decor', 'icon': Icons.chair, 'color': Colors.orange},
+    {'name': 'Beauty', 'icon': Icons.face_retouching_natural, 'color': Colors.purple}, 
+    {'name': 'Watches', 'icon': Icons.watch, 'color': Colors.teal},
+    {'name': 'Baby & Toys', 'icon': Icons.child_friendly, 'color': Colors.amber}, 
+    {'name': 'Groceries', 'icon': Icons.local_grocery_store, 'color': Colors.lightGreen},
+    {'name': 'Automotive', 'icon': Icons.directions_car, 'color': Colors.red}, 
+    {'name': 'Women\'s Bags', 'icon': Icons.shopping_bag, 'color': Colors.deepPurple},
+    {'name': 'Men\'s Wallets', 'icon': Icons.account_balance_wallet, 'color': Colors.brown}, 
+    {'name': 'Muslim Fashion', 'icon': Icons.mosque, 'color': Colors.indigo},
+    {'name': 'Games & Hobbies', 'icon': Icons.sports_esports, 'color': Colors.cyan}, 
+    {'name': 'Computers', 'icon': Icons.computer, 'color': Colors.blueGrey},
+    {'name': 'Sports & Outdoor', 'icon': Icons.sports_soccer, 'color': Colors.deepOrange}, 
+    {'name': 'Men Shoes', 'icon': Icons.directions_run, 'color': Colors.indigoAccent},
+    {'name': 'Cameras', 'icon': Icons.camera_alt, 'color': Colors.blueAccent}, 
+    {'name': 'Travel & Luggage', 'icon': Icons.luggage, 'color': Colors.tealAccent.shade700},
   ];
 
   @override
   Widget build(BuildContext context) {
     User? currentUser = FirebaseAuth.instance.currentUser;
     
-    // কলাম সংখ্যা ঠিক করা
     double screenWidth = MediaQuery.of(context).size.width;
     int gridColumns = 2; 
-    if (screenWidth > 1000) {
-      gridColumns = 5; 
-    } else if (screenWidth > 700) {
-      gridColumns = 4; 
-    } else if (screenWidth > 500) {
-      gridColumns = 3; 
-    }
+    if (screenWidth > 1000) { gridColumns = 5; } 
+    else if (screenWidth > 700) { gridColumns = 4; } 
+    else if (screenWidth > 500) { gridColumns = 3; }
 
     return Scaffold(
       backgroundColor: Colors.grey[100], 
@@ -705,7 +771,6 @@ class _ShopeeHomeState extends State<ShopeeHome> {
             color: Colors.white, 
             child: Column(
               children:[
-                // স্থির সার্চ বার
                 Container(
                   color: Colors.deepOrange, padding: const EdgeInsets.fromLTRB(15, 0, 15, 15), 
                   child: Container(
@@ -723,7 +788,7 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children:[
-                        if (searchQuery.isEmpty) ...[
+                        if (searchQuery.isEmpty && selectedCategoryFilter.isEmpty) ...[
                           // ব্যানার সেকশন
                           StreamBuilder(
                             stream: FirebaseFirestore.instance.collection('banners').snapshots(),
@@ -740,7 +805,7 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                             stream: FirebaseFirestore.instance.collection('categories').snapshots(),
                             builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
                               return SizedBox(
-                                height: 105, // বর্ডারের জন্য উচ্চতা একটু বাড়ানো হয়েছে
+                                height: 105, 
                                 child: ListView.builder(
                                   scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 10),
                                   itemCount: (snapshot.hasData && snapshot.data!.docs.isNotEmpty) ? snapshot.data!.docs.length : staticCategories.length,
@@ -750,19 +815,19 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                                       return _buildDynamicCategory(cat['name'], cat['image_url']);
                                     }
                                     var cat = staticCategories[index];
-                                    return _buildStaticCategory(cat['name'], cat['icon']);
+                                    return _buildStaticCategory(cat['name'], cat['icon'], cat['color']);
                                   },
                                 ),
                               );
                             }
                           ),
 
-                          // ফ্ল্যাশ সেল সেকশন (রিয়েল ডাটা ফিল্টার সহ)
+                          // ফ্ল্যাশ সেল সেকশন
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10), 
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween, 
-                              children: [
+                              children:[
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), 
                                   decoration: BoxDecoration(color: Colors.amber.shade100, borderRadius: BorderRadius.circular(5)), 
@@ -774,87 +839,150 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                           ),
 
                           StreamBuilder(
-                            // এখানে শুধু সেই পণ্যগুলো আসবে যা এডমিন এপ্রুভ করেছে এবং ফ্ল্যাশ সেলে পাঠিয়েছে
-                            stream: FirebaseFirestore.instance.collection('products')
-                                .where('status', isEqualTo: 'approved')
-                                .where('is_flash_sale', isEqualTo: true)
-                                .snapshots(),
+                            stream: FirebaseFirestore.instance.collection('products').where('status', isEqualTo: 'approved').where('is_flash_sale', isEqualTo: true).snapshots(),
                             builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                              // যদি ডাটাবেসে ফ্ল্যাশ সেলের পণ্য থাকে
                               if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
                                 return SizedBox(
                                   height: 180, 
                                   child: ListView.builder(
-                                    scrollDirection: Axis.horizontal, 
-                                    padding: const EdgeInsets.symmetric(horizontal: 10), 
+                                    scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 10), 
                                     itemCount: snapshot.data!.docs.length, 
-                                    itemBuilder: (context, index) => _buildProductCardFirebase(
-                                      context, 
-                                      snapshot.data!.docs[index], 
-                                      isHorizontal: true
-                                    )
+                                    itemBuilder: (context, index) => _buildProductCardFirebase(context, snapshot.data!.docs[index], isHorizontal: true)
                                   )
                                 );
                               }
-                              
-                              // ডাটা না থাকলে আর ডামি পণ্য দেখাবে না, পুরো সেকশনটিই অদৃশ্য হয়ে যাবে
                               return const SizedBox.shrink(); 
                             }
                           ),
                         ],
 
-                        // প্রোডাক্ট গ্রিড সেকশন (সার্চ এবং ক্যাটাগরি ফিল্টার সহ)
-                        Padding(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[
-                          Text(searchQuery.isNotEmpty ? 'SEARCH RESULTS' : (selectedCategoryFilter.isNotEmpty ? '$selectedCategoryFilter PRODUCTS' : 'NEW PRODUCTS'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), 
-                          if(searchQuery.isEmpty && selectedCategoryFilter.isEmpty) const Text('See all', style: TextStyle(color: Colors.deepOrange, fontSize: 14))
-                        ])),
+                        // ====================================================
+                        // SMART ENGINE: NEW PRODUCTS + RECOMMENDATIONS (Your Idea)
+                        // ====================================================
                         StreamBuilder(
-                          stream: FirebaseFirestore.instance.collection('products').orderBy('timestamp', descending: true).snapshots(),
-                          builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                            if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: Padding(padding: EdgeInsets.all(20.0), child: CircularProgressIndicator()));
-                            if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Padding(padding: EdgeInsets.all(20.0), child: Text('No products available')));
+                          // ইউজারের হিস্ট্রি চেক করছি প্রথমে
+                          stream: currentUser != null
+                              ? FirebaseFirestore.instance.collection('users').doc(currentUser.uid).collection('recently_viewed').orderBy('viewed_at', descending: true).limit(3).snapshots()
+                              : const Stream<QuerySnapshot>.empty(),
+                          builder: (context, AsyncSnapshot<QuerySnapshot> recentSnapshot) {
                             
-                            var docs = snapshot.data!.docs;
+                            bool hasHistory = recentSnapshot.hasData && recentSnapshot.data!.docs.isNotEmpty;
+                            List<String> preferredCategories =[];
 
-                            // ১. এডমিন এপ্রুভ করা পণ্যের ফিল্টার (Magic Start)
-                            docs = docs.where((doc) {
-                              Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-                              // যদি স্ট্যাটাস approved থাকে তবেই দেখাবে, নতুবা না
-                              return data.containsKey('status') && data['status'] == 'approved';
-                            }).toList();
-
-                            // ১. সার্চের ফিল্টার
-                            if (searchQuery.isNotEmpty) {
-                              docs = docs.where((doc) {
-                                Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-                                String name = data['product_name'].toString().toLowerCase();
-                                List<dynamic> tags = data.containsKey('search_tags') ? data['search_tags'] :[];
-                                if (name.contains(searchQuery)) return true;
-                                for (var tag in tags) { if (tag.toString().toLowerCase().contains(searchQuery)) return true; }
-                                return false; 
-                              }).toList();
+                            if (hasHistory) {
+                              for (var doc in recentSnapshot.data!.docs) {
+                                if (doc.data().toString().contains('category') && doc['category'] != null) {
+                                  preferredCategories.add(doc['category']);
+                                }
+                              }
                             }
 
-                            // ২. ক্যাটাগরি ফিল্টার (Magic Here)
-                            if (selectedCategoryFilter.isNotEmpty) {
-                              docs = docs.where((doc) {
-                                Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-                                String category = data.containsKey('category') ? data['category'].toString() : '';
-                                return category == selectedCategoryFilter;
-                              }).toList();
-                            }
+                            // মূল প্রোডাক্ট স্ট্রিম (সব প্রোডাক্ট)
+                            return StreamBuilder(
+                              stream: FirebaseFirestore.instance.collection('products').orderBy('timestamp', descending: true).snapshots(),
+                              builder: (context, AsyncSnapshot<QuerySnapshot> prodSnapshot) {
+                                if (prodSnapshot.connectionState == ConnectionState.waiting) return const Center(child: Padding(padding: EdgeInsets.all(20.0), child: CircularProgressIndicator()));
+                                if (!prodSnapshot.hasData || prodSnapshot.data!.docs.isEmpty) return const SizedBox.shrink();
 
-                            if (docs.isEmpty) return Center(child: Padding(padding: const EdgeInsets.all(30.0), child: Text('No products found for ${selectedCategoryFilter.isNotEmpty ? selectedCategoryFilter : "your search"}!', style: const TextStyle(fontSize: 16, color: Colors.grey))));
+                                var docs = prodSnapshot.data!.docs;
+                                
+                                // ফিল্টার লজিক (Search বা Category Select করলে)
+                                docs = docs.where((doc) {
+                                  Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+                                  return data.containsKey('status') && data['status'] == 'approved';
+                                }).toList();
 
-                            return GridView.builder(
-                              shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), padding: const EdgeInsets.symmetric(horizontal: 15),
-                              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: gridColumns, childAspectRatio: 0.75, crossAxisSpacing: 10, mainAxisSpacing: 10),
-                              itemCount: docs.length,
-                              itemBuilder: (context, index) => _buildProductCardFirebase(context, docs[index]),
+                                if (searchQuery.isNotEmpty) {
+                                  docs = docs.where((doc) {
+                                    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+                                    String name = data['product_name'].toString().toLowerCase();
+                                    List<dynamic> tags = data.containsKey('search_tags') ? data['search_tags'] :[];
+                                    if (name.contains(searchQuery)) return true;
+                                    for (var tag in tags) { if (tag.toString().toLowerCase().contains(searchQuery)) return true; }
+                                    return false; 
+                                  }).toList();
+                                }
+
+                                if (selectedCategoryFilter.isNotEmpty) {
+                                  docs = docs.where((doc) {
+                                    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+                                    String category = data.containsKey('category') ? data['category'].toString() : '';
+                                    return category == selectedCategoryFilter;
+                                  }).toList();
+                                }
+
+                                bool isSearchingOrFiltering = searchQuery.isNotEmpty || selectedCategoryFilter.isNotEmpty;
+
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children:[
+                                    // হেডার
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10), 
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+                                        children:[
+                                          Text(searchQuery.isNotEmpty ? 'SEARCH RESULTS' : (selectedCategoryFilter.isNotEmpty ? '$selectedCategoryFilter PRODUCTS' : 'NEW PRODUCTS'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), 
+                                          if(!isSearchingOrFiltering) const Text('See all', style: TextStyle(color: Colors.deepOrange, fontSize: 14))
+                                        ]
+                                      )
+                                    ),
+
+                                    // যদি সার্চ করে বা ফিল্টার করে বা ইউজারের হিস্ট্রি না থাকে -> বড় গ্রিড দেখাবে
+                                    if (isSearchingOrFiltering || !hasHistory)
+                                      GridView.builder(
+                                        shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), padding: const EdgeInsets.symmetric(horizontal: 15),
+                                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: gridColumns, childAspectRatio: 0.70, crossAxisSpacing: 10, mainAxisSpacing: 10),
+                                        itemCount: docs.length,
+                                        itemBuilder: (context, index) => _buildProductCardFirebase(context, docs[index]),
+                                      )
+                                    // যদি ইউজারের হিস্ট্রি থাকে -> নিউ প্রোডাক্ট এক লাইনে স্লাইডার হয়ে যাবে
+                                    else
+                                      SizedBox(
+                                        height: 200, 
+                                        child: ListView.builder(
+                                          scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 10), 
+                                          itemCount: docs.length > 10 ? 10 : docs.length, // সর্বোচ্চ ১০টি নতুন প্রোডাক্ট দেখাবে
+                                          itemBuilder: (context, index) => _buildProductCardFirebase(context, docs[index], isHorizontal: true)
+                                        )
+                                      ),
+
+                                    // RECOMMENDED FOR YOU (শুধুমাত্র যদি হিস্ট্রি থাকে এবং সার্চ না করে)
+                                    if (hasHistory && !isSearchingOrFiltering && preferredCategories.isNotEmpty) ...[
+                                      const Padding(
+                                        padding: EdgeInsets.fromLTRB(15, 25, 15, 10),
+                                        child: Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children:[
+                                            Text('RECOMMENDED FOR YOU', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                            Icon(Icons.auto_awesome, color: Colors.deepOrange, size: 20)
+                                          ]
+                                        )
+                                      ),
+                                      StreamBuilder(
+                                        stream: FirebaseFirestore.instance.collection('products')
+                                            .where('status', isEqualTo: 'approved')
+                                            .where('category', whereIn: preferredCategories)
+                                            .snapshots(),
+                                        builder: (context, AsyncSnapshot<QuerySnapshot> recSnapshot) {
+                                          if (!recSnapshot.hasData || recSnapshot.data!.docs.isEmpty) return const SizedBox.shrink();
+
+                                          return GridView.builder(
+                                            shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), padding: const EdgeInsets.symmetric(horizontal: 15),
+                                            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: gridColumns, childAspectRatio: 0.70, crossAxisSpacing: 10, mainAxisSpacing: 10),
+                                            itemCount: recSnapshot.data!.docs.length,
+                                            itemBuilder: (context, index) => _buildProductCardFirebase(context, recSnapshot.data!.docs[index]),
+                                          );
+                                        }
+                                      ),
+                                    ]
+                                  ],
+                                );
+                              }
                             );
-                          },
+                          }
                         ),
-                        const SizedBox(height: 20),
+                        const SizedBox(height: 30),
                       ],
                     ),
                   ),
@@ -867,25 +995,16 @@ class _ShopeeHomeState extends State<ShopeeHome> {
     );
   }
 
-  // ক্যাটাগরি কার্ডের ক্লিক ফাংশন
-  Widget _buildStaticCategory(String label, IconData icon) {
+  Widget _buildStaticCategory(String label, IconData icon, Color iconColor) {
     bool isSelected = selectedCategoryFilter == label;
     return InkWell(
-      onTap: () {
-        setState(() {
-          // যদি আগেই সিলেক্ট করা থাকে, তবে আবার ক্লিক করলে সিলেকশন বাতিল হয়ে যাবে
-          selectedCategoryFilter = isSelected ? '' : label; 
-        });
-      },
+      onTap: () { setState(() { selectedCategoryFilter = isSelected ? '' : label; }); },
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8), 
         child: Column(children:[
           Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.deepOrange, width: 2.5) : Border.all(color: Colors.transparent, width: 2.5),
-            ),
-            child: CircleAvatar(radius: 26, backgroundColor: Colors.grey.shade100, child: Icon(icon, color: isSelected ? Colors.deepOrange : Colors.black87, size: 30))
+            decoration: BoxDecoration(shape: BoxShape.circle, border: isSelected ? Border.all(color: Colors.deepOrange, width: 2.5) : Border.all(color: Colors.transparent, width: 2.5)),
+            child: CircleAvatar(radius: 26, backgroundColor: iconColor.withOpacity(0.15), child: Icon(icon, color: iconColor, size: 28))
           ), 
           const SizedBox(height: 5), 
           SizedBox(width: 60, child: Text(label, textAlign: TextAlign.center, style: TextStyle(fontSize: 9, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, color: isSelected ? Colors.deepOrange : Colors.black), maxLines: 2, overflow: TextOverflow.ellipsis))
@@ -897,19 +1016,12 @@ class _ShopeeHomeState extends State<ShopeeHome> {
   Widget _buildDynamicCategory(String label, String imageUrl) {
     bool isSelected = selectedCategoryFilter == label;
     return InkWell(
-      onTap: () {
-        setState(() {
-          selectedCategoryFilter = isSelected ? '' : label; 
-        });
-      },
+      onTap: () { setState(() { selectedCategoryFilter = isSelected ? '' : label; }); },
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8), 
         child: Column(children:[
           Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.deepOrange, width: 2.5) : Border.all(color: Colors.transparent, width: 2.5),
-            ),
+            decoration: BoxDecoration(shape: BoxShape.circle, border: isSelected ? Border.all(color: Colors.deepOrange, width: 2.5) : Border.all(color: Colors.transparent, width: 2.5)),
             child: CircleAvatar(radius: 26, backgroundColor: Colors.grey.shade100, backgroundImage: NetworkImage(imageUrl))
           ), 
           const SizedBox(height: 5), 
@@ -919,93 +1031,32 @@ class _ShopeeHomeState extends State<ShopeeHome> {
     );
   }
 
-  Widget _buildProductCardStatic(String name, String price, IconData icon) {
-    return Container(width: 140, margin: const EdgeInsets.only(right: 10), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Container(height: 100, decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), child: Center(child: Icon(icon, size: 50, color: Colors.grey))), Padding(padding: const EdgeInsets.all(8.0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 1, overflow: TextOverflow.ellipsis), const SizedBox(height: 5), Text(price, style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14))]))]));
-  }
-
   Widget _buildProductCardFirebase(BuildContext context, QueryDocumentSnapshot product, {bool isHorizontal = false}) {
     Map<String, dynamic> data = product.data() as Map<String, dynamic>;
     List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] :[];
     String firstImage = images.isNotEmpty ? images[0] : '';
     
-    // ফ্ল্যাশ সেলের জন্য স্পেশাল প্রাইস চেক
     bool isFlashSale = data.containsKey('is_flash_sale') ? data['is_flash_sale'] : false;
-    String displayPrice = isFlashSale && data.containsKey('discount_price') && data['discount_price'].toString().isNotEmpty 
-        ? data['discount_price'].toString() 
-        : data['price'].toString();
+    String displayPrice = isFlashSale && data.containsKey('discount_price') && data['discount_price'].toString().isNotEmpty ? data['discount_price'].toString() : data['price'].toString();
 
-    // ডিসকাউন্ট % হিসাব করা
     int currentPrice = int.tryParse(displayPrice) ?? 0;
     int originalPrice = int.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : '0') ?? 0;
     int discountPercent = 0;
-    
-    if (originalPrice > currentPrice) {
-      discountPercent = (((originalPrice - currentPrice) / originalPrice) * 100).round();
-    }
+    if (originalPrice > currentPrice) discountPercent = (((originalPrice - currentPrice) / originalPrice) * 100).round();
 
     return InkWell(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: product))),
       child: Container(
-        width: isHorizontal ? 140 : null, 
-        margin: isHorizontal ? const EdgeInsets.only(right: 10) : EdgeInsets.zero,
+        width: isHorizontal ? 140 : null, margin: isHorizontal ? const EdgeInsets.only(right: 10) : EdgeInsets.zero,
         decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
           Expanded(
-            child: Stack(
-              children:[
-                // ১. মূল ছবি
-                Container(
-                  width: double.infinity, 
-                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), 
-                  child: firstImage.isNotEmpty 
-                      ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(10)), child: Image.network(firstImage, fit: BoxFit.cover)) 
-                      : const Center(child: Icon(Icons.image, size: 50, color: Colors.grey))
-                ),
-                
-                // ২. ডিসকাউন্ট ব্যাজ (উপরে ডানদিকে)
-                if (discountPercent > 0)
-                  Positioned(
-                    top: 0,
-                    right: 0,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: const BoxDecoration(
-                        color: Colors.red,
-                        borderRadius: BorderRadius.only(
-                          topRight: Radius.circular(10),
-                          bottomLeft: Radius.circular(10), // একটু সুন্দর রাউন্ড শেপ
-                        ),
-                      ),
-                      child: Text(
-                        '-$discountPercent%', 
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
-                      ),
-                    ),
-                  ),
-              ],
-            )
+            child: Stack(children:[
+              Container(width: double.infinity, decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), child: firstImage.isNotEmpty ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(10)), child: Image.network(firstImage, fit: BoxFit.cover)) : const Center(child: Icon(Icons.image, size: 50, color: Colors.grey))), 
+              if (discountPercent > 0) Positioned(top: 0, right: 0, child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: const BoxDecoration(color: Colors.red, borderRadius: BorderRadius.only(topRight: Radius.circular(10), bottomLeft: Radius.circular(10))), child: Text('-$discountPercent%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))
+            ])
           ), 
-          Padding(
-            padding: const EdgeInsets.all(10.0), 
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start, 
-              children:[
-                Text(data['product_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13), maxLines: 2, overflow: TextOverflow.ellipsis), 
-                const SizedBox(height: 5), 
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children:[
-                    // বর্তমান দাম
-                    Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 15)),
-                    const SizedBox(width: 5),
-                    // আগের দাম (কেটে দেওয়া অবস্থায়)
-                    if (discountPercent > 0)
-                      Text('৳$originalPrice', style: const TextStyle(color: Colors.grey, decoration: TextDecoration.lineThrough, fontSize: 10)),
-                  ],
-                )
-              ]
-            )
-          )
+          Padding(padding: const EdgeInsets.all(10.0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text(data['product_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis), const SizedBox(height: 5), Row(crossAxisAlignment: CrossAxisAlignment.end, children:[Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14)), const SizedBox(width: 5), if (discountPercent > 0) Text('৳$originalPrice', style: const TextStyle(color: Colors.grey, decoration: TextDecoration.lineThrough, fontSize: 10))])]))
         ]),
       ),
     );
@@ -1013,30 +1064,222 @@ class _ShopeeHomeState extends State<ShopeeHome> {
 }
 
 // ==========================================
-// ১ নম্বর পেজ: User Profile
+// ১ নম্বর পেজ: User Profile (Superfast with Local Cache)
 // ==========================================
-class UserDashboard extends StatelessWidget {
+class UserDashboard extends StatefulWidget {
   const UserDashboard({super.key});
+
+  @override
+  State<UserDashboard> createState() => _UserDashboardState();
+}
+
+class _UserDashboardState extends State<UserDashboard> {
+  User? currentUser = FirebaseAuth.instance.currentUser;
+  final ImagePicker _picker = ImagePicker();
+
+  // লোকাল ভেরিয়েবল (ইনস্ট্যান্ট দেখানোর জন্য)
+  String _userName = 'Loading...';
+  String _profileImageUrl = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfileData(); // পেজ ওপেন হলেই ডাটা লোড হবে
+  }
+
+  // ম্যাজিক ফাংশন: লোকাল মেমরি থেকে ডাটা আনবে, এরপর ফায়ারবেস থেকে আপডেট করবে
+  Future<void> _loadProfileData() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    
+    // ১. প্রথমে লোকাল মেমরি (Cache) থেকে সাথে সাথে ডাটা দেখাবে (0 second delay)
+    if (mounted) {
+      setState(() {
+        _userName = prefs.getString('user_name') ?? 'Customer';
+        _profileImageUrl = prefs.getString('profile_image') ?? '';
+      });
+    }
+
+    // ২. ব্যাকগ্রাউন্ডে ফায়ারবেস থেকে চেক করবে নতুন কোনো আপডেট আছে কি না
+    if (currentUser != null) {
+      DocumentSnapshot doc = await FirebaseFirestore.instance.collection('users').doc(currentUser!.uid).get();
+      if (doc.exists) {
+        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+        String newName = data['name'] ?? 'Customer';
+        String newImage = data.containsKey('profile_image_url') ? data['profile_image_url'] : '';
+
+        // যদি ডাটাবেসের ডাটার সাথে লোকাল ডাটার অমিল থাকে, তবে আপডেট করে সেভ করবে
+        if (_userName != newName || _profileImageUrl != newImage) {
+          prefs.setString('user_name', newName);
+          prefs.setString('profile_image', newImage);
+          if (mounted) {
+            setState(() {
+              _userName = newName;
+              _profileImageUrl = newImage;
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // ছবি আপলোডের ফাংশন
+  Future<void> _uploadProfilePicture() async {
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    if (image == null || currentUser == null) return;
+
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+      
+      String fileName = 'profile_${currentUser!.uid}_${DateTime.now().millisecondsSinceEpoch}';
+      Reference ref = FirebaseStorage.instance.ref().child('profile_pictures').child(fileName);
+      
+      if (kIsWeb) {
+        Uint8List bytes = await image.readAsBytes();
+        await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
+      } else {
+        await ref.putFile(File(image.path));
+      }
+      
+      String downloadUrl = await ref.getDownloadURL();
+      
+      // ফায়ারবেসে সেভ
+      await FirebaseFirestore.instance.collection('users').doc(currentUser!.uid).update({'profile_image_url': downloadUrl});
+
+      // লোকাল মেমরিতেও সাথে সাথে সেভ করে দেওয়া
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+      prefs.setString('profile_image', downloadUrl);
+
+      if (!mounted) return;
+      Navigator.pop(context); 
+      
+      // UI আপডেট করা
+      setState(() { _profileImageUrl = downloadUrl; });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile picture updated successfully! 🎉')));
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  void _showSupportOptions(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              Container(width: 40, height: 5, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10))),
+              const SizedBox(height: 20),
+              const Text('Customer Support', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              const Text('We are here to help! Choose an option below:', style: TextStyle(color: Colors.grey)),
+              const SizedBox(height: 20),
+              ListTile(leading: const CircleAvatar(backgroundColor: Colors.teal, child: Icon(Icons.call, color: Colors.white)), title: const Text('Call Us Now', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('01700-000000'), onTap: () async { final Uri url = Uri.parse('tel:01700000000'); if (await canLaunchUrl(url)) { await launchUrl(url); } }),
+              const Divider(),
+              ListTile(leading: const CircleAvatar(backgroundColor: Colors.deepOrange, child: Icon(Icons.email, color: Colors.white)), title: const Text('Send an Email', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('support@doharshop.com'), onTap: () async { final Uri url = Uri.parse('mailto:support@doharshop.com?subject=Customer Support Request'); if (await canLaunchUrl(url)) { await launchUrl(url); } }),
+              const SizedBox(height: 10),
+            ],
+          ),
+        );
+      }
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    User? currentUser = FirebaseAuth.instance.currentUser;
     return Scaffold(
       backgroundColor: Colors.grey[100],
-      appBar: AppBar(title: const Text('My Profile', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), backgroundColor: Colors.deepOrange, centerTitle: true, automaticallyImplyLeading: false),
+      appBar: AppBar(
+        title: const Text('My Profile', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.deepOrange, centerTitle: true,
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()))),
+      ),
       body: Column(
         children:[
           Container(
             padding: const EdgeInsets.all(20), decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.only(bottomLeft: Radius.circular(30), bottomRight: Radius.circular(30))),
-            child: Row(children:[const CircleAvatar(radius: 40, backgroundColor: Colors.orange, child: Icon(Icons.person, size: 40, color: Colors.white)), const SizedBox(width: 20), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[FutureBuilder<DocumentSnapshot>(future: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).get(), builder: (context, snapshot) {if (snapshot.connectionState == ConnectionState.waiting) return const Text('Loading...'); if (snapshot.hasData && snapshot.data!.exists) {return Text(snapshot.data!['name'], style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold));} return const Text('Customer', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold));}), Text(currentUser?.email ?? 'No Email', style: const TextStyle(color: Colors.grey)), const SizedBox(height: 5), Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3), decoration: BoxDecoration(color: Colors.orange[100], borderRadius: BorderRadius.circular(10)), child: const Text('MEMBER', style: TextStyle(color: Colors.deepOrange, fontSize: 12, fontWeight: FontWeight.bold)))]))]),
+            child: Row(
+              children:[
+                Stack(
+                  alignment: Alignment.bottomRight,
+                  children:[
+                    // এখন আর FutureBuilder নেই, সরাসরি লোকাল মেমরি থেকে ছবি দেখাচ্ছে
+                    CircleAvatar(
+                      radius: 40,
+                      backgroundColor: Colors.orange.shade100,
+                      backgroundImage: _profileImageUrl.isNotEmpty ? NetworkImage(_profileImageUrl) : null,
+                      child: _profileImageUrl.isEmpty ? const Icon(Icons.person, size: 40, color: Colors.deepOrange) : null,
+                    ),
+                    InkWell(
+                      onTap: _uploadProfilePicture,
+                      child: Container(padding: const EdgeInsets.all(4), decoration: const BoxDecoration(color: Colors.teal, shape: BoxShape.circle), child: const Icon(Icons.camera_alt, color: Colors.white, size: 14)),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 20),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start, 
+                    children:[
+                      // লোকাল মেমরি থেকে ইনস্ট্যান্ট নাম
+                      Text(_userName, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                      Text(currentUser?.email ?? 'No Email', style: const TextStyle(color: Colors.grey)), 
+                      const SizedBox(height: 5), 
+                      Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3), decoration: BoxDecoration(color: Colors.orange[100], borderRadius: BorderRadius.circular(10)), child: const Text('MEMBER', style: TextStyle(color: Colors.deepOrange, fontSize: 12, fontWeight: FontWeight.bold)))
+                    ]
+                  )
+                )
+              ]
+            ),
           ),
           const SizedBox(height: 20),
-          Expanded(child: GridView.count(crossAxisCount: 2, padding: const EdgeInsets.all(20), crossAxisSpacing: 15, mainAxisSpacing: 15, childAspectRatio: 1.5, children:[_buildDashboardCard(Icons.history, 'Order History'), _buildDashboardCard(Icons.favorite_border, 'Wishlist'), _buildDashboardCard(Icons.location_on_outlined, 'Shipping Address'), _buildDashboardCard(Icons.support_agent, 'Customer Support')])),
-          Padding(padding: const EdgeInsets.all(20.0), child: SizedBox(width: double.infinity, height: 50, child: OutlinedButton.icon(style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red)), icon: const Icon(Icons.logout, color: Colors.red), label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold)), onPressed: () async {await FirebaseAuth.instance.signOut(); Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));})))
+          Expanded(
+            child: GridView.count(
+              crossAxisCount: 2, padding: const EdgeInsets.all(20), crossAxisSpacing: 15, mainAxisSpacing: 15, childAspectRatio: 1.5, 
+              children:[
+                _buildDashboardCard(Icons.history, 'Order History', () => Navigator.push(context, MaterialPageRoute(builder: (context) => const OrderHistoryPage()))),
+                _buildDashboardCard(Icons.favorite_border, 'Wishlist', () => Navigator.push(context, MaterialPageRoute(builder: (context) => const WishlistPage()))),
+                _buildDashboardCard(Icons.location_on_outlined, 'Shipping Address', () => Navigator.push(context, MaterialPageRoute(builder: (context) => const AddressListPage()))),
+                _buildDashboardCard(Icons.support_agent, 'Customer Support', () => _showSupportOptions(context)),
+              ]
+            )
+          ),
+          Padding(
+            padding: const EdgeInsets.all(20.0), 
+            child: SizedBox(
+              width: double.infinity, height: 50, 
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red)), 
+                icon: const Icon(Icons.logout, color: Colors.red), 
+                label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold)), 
+                onPressed: () async {
+                  // লগআউট করার সময় লোকাল মেমরি ক্লিয়ার করে দেওয়া
+                  SharedPreferences prefs = await SharedPreferences.getInstance();
+                  await prefs.clear();
+                  await FirebaseAuth.instance.signOut(); 
+                  Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                }
+              )
+            )
+          )
         ],
       ),
     );
   }
-  Widget _buildDashboardCard(IconData icon, String title) {return Container(decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), boxShadow:[BoxShadow(color: Colors.grey.shade200, blurRadius: 5, spreadRadius: 2)]), child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(icon, size: 40, color: Colors.deepOrange), const SizedBox(height: 10), Text(title, style: const TextStyle(fontWeight: FontWeight.bold))]));}
+  
+  Widget _buildDashboardCard(IconData icon, String title, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), boxShadow:[BoxShadow(color: Colors.grey.shade200, blurRadius: 5, spreadRadius: 2)]), 
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(icon, size: 40, color: Colors.deepOrange), const SizedBox(height: 10), Text(title, style: const TextStyle(fontWeight: FontWeight.bold))])
+      ),
+    );
+  }
 }
 
 // ==========================================
@@ -1285,7 +1528,7 @@ class _AddProductPageState extends State<AddProductPage> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
           const Text('Product Images', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 10),
           Row(children:[InkWell(onTap: pickImages, child: Container(height: 90, width: 90, decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.deepOrange, width: 2)), child: const Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(Icons.add_a_photo, color: Colors.deepOrange), Text('Add')]))), const SizedBox(width: 10), Expanded(child: SizedBox(height: 90, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: selectedImages.length, itemBuilder: (context, index) {return Container(width: 90, margin: const EdgeInsets.only(right: 10), decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), image: DecorationImage(image: kIsWeb ? NetworkImage(selectedImages[index].path) : FileImage(File(selectedImages[index].path)) as ImageProvider, fit: BoxFit.cover)), child: Align(alignment: Alignment.topRight, child: IconButton(icon: const Icon(Icons.cancel, color: Colors.red), onPressed: () => setState(() => selectedImages.removeAt(index)))));})))]),
-          const SizedBox(height: 25), DropdownButtonFormField<String>(decoration: const InputDecoration(labelText: 'Select Category', border: OutlineInputBorder()), value: selectedCategory, items:['Mobile & Accessories', 'Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 'Groceries', 'Watches'].map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(), onChanged: (val) => setState(() => selectedCategory = val)),
+          const SizedBox(height: 25), DropdownButtonFormField<String>(decoration: const InputDecoration(labelText: 'Select Category', border: OutlineInputBorder()), value: selectedCategory, items:['Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 'Watches', 'Baby & Toys', 'Groceries', 'Automotive', 'Women\'s Bags', 'Men\'s Wallets', 'Muslim Fashion', 'Games & Hobbies', 'Computers', 'Sports & Outdoor', 'Men Shoes', 'Cameras', 'Travel & Luggage'].map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(), onChanged: (val) => setState(() => selectedCategory = val)),
           const SizedBox(height: 20), TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Product Name', border: OutlineInputBorder())), const SizedBox(height: 15),
           Row(children:[Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Sale Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: originalPriceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Original Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: stockController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Stock Qty', border: OutlineInputBorder())))]),
           const SizedBox(height: 25), 
@@ -1346,15 +1589,111 @@ class _AdminMainScreenState extends State<AdminMainScreen> {
 }
 
 // ==========================================
-// অ্যাডমিন পেজ ১: Dashboard (Overall Platform)
+// অ্যাডমিন পেজ ১: Dashboard (Overall Platform & Smart Drawer)
 // ==========================================
 class AdminDashboard extends StatelessWidget {
   const AdminDashboard({super.key});
 
   @override
   Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+
     return Scaffold(
-      appBar: AppBar(backgroundColor: Colors.deepOrange, title: const Text('D Shop ADMIN', style: TextStyle(color: Colors.white)), leading: const Icon(Icons.menu, color: Colors.white)),
+      appBar: AppBar(
+        backgroundColor: Colors.deepOrange, 
+        title: const Text('D Shop ADMIN', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        iconTheme: const IconThemeData(color: Colors.white), // ড্রয়ার আইকনের কালার সাদা করার জন্য
+      ),
+      
+      // ==========================================
+      // অ্যাডমিন সাইড মেনু (Smart Admin Drawer)
+      // ==========================================
+      drawer: Drawer(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children:[
+            // অ্যাডমিন প্রোফাইল হেডার
+            UserAccountsDrawerHeader(
+              decoration: const BoxDecoration(color: Colors.deepOrange),
+              accountName: FutureBuilder<DocumentSnapshot>(
+                future: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).get(),
+                builder: (context, snapshot) {
+                  if (snapshot.hasData && snapshot.data!.exists) {
+                    return Text(snapshot.data!['name'] ?? 'Admin', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18));
+                  }
+                  return const Text('Chief Admin', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18));
+                },
+              ),
+              accountEmail: const Text('Super Admin Panel', style: TextStyle(color: Colors.white70)),
+              currentAccountPicture: const CircleAvatar(
+                backgroundColor: Colors.white, 
+                child: Icon(Icons.admin_panel_settings, size: 40, color: Colors.deepOrange)
+              ),
+            ),
+            
+            // মেনু অপশনগুলো
+            ListTile(
+              leading: const Icon(Icons.notifications_active, color: Colors.blue),
+              title: const Text('Push Notifications', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text('Send offers to all', style: TextStyle(fontSize: 10, color: Colors.grey)),
+              onTap: () {
+                Navigator.pop(context); // মেনু বন্ধ করবে
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Notification system coming soon!')));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.category, color: Colors.teal),
+              title: const Text('Manage Categories', style: TextStyle(fontWeight: FontWeight.bold)),
+              onTap: () {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Category management coming soon!')));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.view_carousel, color: Colors.orange),
+              title: const Text('Manage Banners', style: TextStyle(fontWeight: FontWeight.bold)),
+              onTap: () {
+                Navigator.pop(context);
+                // আমরা আগে যেই ব্যানার পেজ বানিয়েছিলাম সেখানে নিয়ে যাবে
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminBannerUploadPage()));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.motorcycle, color: Colors.purple),
+              title: const Text('Manage Riders', style: TextStyle(fontWeight: FontWeight.bold)),
+              onTap: () {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Rider management coming soon!')));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.map, color: Colors.green),
+              title: const Text('Delivery Zones & Charges', style: TextStyle(fontWeight: FontWeight.bold)),
+              onTap: () {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Zone setting coming soon!')));
+              },
+            ),
+            const Divider(height: 30, thickness: 1),
+            
+            // লগ আউট বাটন
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text('Secure Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              onTap: () async {
+                await FirebaseAuth.instance.signOut();
+                if (context.mounted) {
+                  Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+
+      // ==========================================
+      // ড্যাশবোর্ড বডি (আগের মতোই থাকবে)
+      // ==========================================
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(15),
         child: Column(
@@ -1366,7 +1705,7 @@ class AdminDashboard extends StatelessWidget {
             const SizedBox(height: 15),
             Row(
               children:[
-                Expanded(child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.green[100], borderRadius: BorderRadius.circular(15)), child: Column(children: const [Text('Total Orders'), Text('১৫০', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold))]))),
+                Expanded(child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.green[100], borderRadius: BorderRadius.circular(15)), child: Column(children: const[Text('Total Orders'), Text('১৫০', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold))]))),
                 const SizedBox(width: 15),
                 Expanded(child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.amber[100], borderRadius: BorderRadius.circular(15)), child: Column(children: const[Text('New Signups'), Text('৫০', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold))]))),
               ],
@@ -1374,29 +1713,23 @@ class AdminDashboard extends StatelessWidget {
             const SizedBox(height: 25),
             const Text('Sales Overview (7 Days)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
-            // ডামি বার চার্ট
             Container(height: 200, decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(15)), child: const Center(child: Icon(Icons.bar_chart, size: 100, color: Colors.teal))),
             const SizedBox(height: 25),
             const Text('Action Center', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
-            // তোমার সেই লাল বক্সে এই কার্ডটি দেখা যাবে
             InkWell(
               onTap: () {
-                // এখানে ভুল পেজের বদলে অ্যাডমিনের এপ্রুভ করার পেজটি কল করো
-                Navigator.push(
-                  context, 
-                  MaterialPageRoute(builder: (context) => const AdminProductApprovalPage()) // সঠিক পেজের নাম দাও
-                );
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminProductApprovalPage()));
               },
               child: Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(15),
-                  boxShadow: [BoxShadow(color: Colors.grey.shade200, blurRadius: 10, offset: const Offset(0, 5))],
+                  boxShadow:[BoxShadow(color: Colors.grey.shade200, blurRadius: 10, offset: const Offset(0, 5))],
                 ),
                 child: Row(
-                  children: [
+                  children:[
                     const CircleAvatar(
                       backgroundColor: Colors.deepOrange,
                       child: Icon(Icons.pending_actions, color: Colors.white),
@@ -1405,9 +1738,8 @@ class AdminDashboard extends StatelessWidget {
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
+                        children:[
                           const Text('Pending Products', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          // ফায়ারবেস থেকে লাইভ সংখ্যা গুনে আনা
                           StreamBuilder(
                             stream: FirebaseFirestore.instance.collection('products')
                                 .where('status', isEqualTo: 'pending')
@@ -1961,7 +2293,7 @@ class RiderProfile extends StatelessWidget {
 }
 
 // ==========================================
-// ক্যাটাগরি পেজ (Real 24 Categories + Firebase Products)
+// ক্যাটাগরি পেজ (রঙিন আইকন ও ১৮টি রিয়েল ক্যাটাগরি সহ)
 // ==========================================
 class CategoryPage extends StatefulWidget {
   const CategoryPage({super.key});
@@ -1971,74 +2303,69 @@ class CategoryPage extends StatefulWidget {
 }
 
 class _CategoryPageState extends State<CategoryPage> {
-  int _selectedCategoryIndex = 0; // বাম দিকের কোন ক্যাটাগরি সিলেক্ট করা আছে
+  int _selectedCategoryIndex = 0; 
 
-  // আপনার দেওয়া ২৪টি আসল ক্যাটাগরির লিস্ট
-  final List<String> mainCategories =[
-    'Mobile & Accessories', 'Watches', 'Health & Beauty', 'Baby & Toys', 
-    'Groceries', 'Automotive', 'Women\'s Bags', 'Men\'s Wallets',
-    'Muslim Fashion', 'Games & Hobbies', 'Women Clothes', 'Men Clothes',
-    'Home & Living', 'Home Appliances', 'Women Shoes', 'Fashion Access.',
-    'Computers', 'Sports & Outdoor', 'Men Shoes', 'Gaming Consoles',
-    'Cameras', 'Vouchers', 'Travel & Luggage', 'Others'
+  // হোম পেজের সাথে মিল রেখে ১৮টি রঙিন ক্যাটাগরি
+  final List<Map<String, dynamic>> mainCategories =[
+    {'name': 'Fashion', 'icon': Icons.checkroom, 'color': Colors.pink}, 
+    {'name': 'Electronics', 'icon': Icons.tv, 'color': Colors.blue},
+    {'name': 'Mobiles', 'icon': Icons.smartphone, 'color': Colors.green}, 
+    {'name': 'Home Decor', 'icon': Icons.chair, 'color': Colors.orange},
+    {'name': 'Beauty', 'icon': Icons.face_retouching_natural, 'color': Colors.purple}, 
+    {'name': 'Watches', 'icon': Icons.watch, 'color': Colors.teal},
+    {'name': 'Baby & Toys', 'icon': Icons.child_friendly, 'color': Colors.amber}, 
+    {'name': 'Groceries', 'icon': Icons.local_grocery_store, 'color': Colors.lightGreen},
+    {'name': 'Automotive', 'icon': Icons.directions_car, 'color': Colors.red}, 
+    {'name': 'Women\'s Bags', 'icon': Icons.shopping_bag, 'color': Colors.deepPurple},
+    {'name': 'Men\'s Wallets', 'icon': Icons.account_balance_wallet, 'color': Colors.brown}, 
+    {'name': 'Muslim Fashion', 'icon': Icons.mosque, 'color': Colors.indigo},
+    {'name': 'Games & Hobbies', 'icon': Icons.sports_esports, 'color': Colors.cyan}, 
+    {'name': 'Computers', 'icon': Icons.computer, 'color': Colors.blueGrey},
+    {'name': 'Sports & Outdoor', 'icon': Icons.sports_soccer, 'color': Colors.deepOrange}, 
+    {'name': 'Men Shoes', 'icon': Icons.directions_run, 'color': Colors.indigoAccent},
+    {'name': 'Cameras', 'icon': Icons.camera_alt, 'color': Colors.blueAccent}, 
+    {'name': 'Travel & Luggage', 'icon': Icons.luggage, 'color': Colors.tealAccent.shade700},
   ];
 
   @override
   Widget build(BuildContext context) {
-    // ডানদিকের গ্রিডের জন্য রেস্পন্সিভ কলাম সংখ্যা
     double screenWidth = MediaQuery.of(context).size.width;
     int gridColumns = screenWidth > 900 ? 4 : (screenWidth > 600 ? 3 : 2);
 
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 1,
+        backgroundColor: Colors.white, elevation: 1,
         title: const Text('Categories', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-        centerTitle: true,
-        actions:[
-          IconButton(icon: const Icon(Icons.search, color: Colors.black), onPressed: () {}),
-        ],
+        centerTitle: true, actions:[IconButton(icon: const Icon(Icons.search, color: Colors.black), onPressed: () {})],
       ),
       body: Row(
         children:[
-          // ==============================
-          // বাম দিকের অংশ (24 Categories)
-          // ==============================
+          // বাম দিকের মেনু
           Container(
-            width: 100, 
-            color: Colors.grey.shade100,
+            width: 100, color: Colors.grey.shade50,
             child: ListView.builder(
               itemCount: mainCategories.length,
               itemBuilder: (context, index) {
                 bool isSelected = _selectedCategoryIndex == index;
                 return InkWell(
-                  onTap: () {
-                    setState(() {
-                      _selectedCategoryIndex = index; // ক্লিক করলে ক্যাটাগরি পাল্টে যাবে
-                    });
-                  },
+                  onTap: () { setState(() { _selectedCategoryIndex = index; }); },
                   child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 5),
+                    padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 5),
                     decoration: BoxDecoration(
                       color: isSelected ? Colors.white : Colors.transparent,
-                      border: Border(
-                        left: BorderSide(
-                          color: isSelected ? Colors.deepOrange : Colors.transparent, 
-                          width: 4 
-                        )
-                      )
+                      border: Border(left: BorderSide(color: isSelected ? Colors.deepOrange : Colors.transparent, width: 4))
                     ),
-                    child: Center(
-                      child: Text(
-                        mainCategories[index],
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                          color: isSelected ? Colors.deepOrange : Colors.grey.shade700,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(mainCategories[index]['icon'], color: isSelected ? Colors.deepOrange : mainCategories[index]['color'], size: 24),
+                        const SizedBox(height: 5),
+                        Text(
+                          mainCategories[index]['name'], textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 10, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, color: isSelected ? Colors.deepOrange : Colors.grey.shade700),
                         ),
-                      ),
+                      ],
                     ),
                   ),
                 );
@@ -2046,60 +2373,29 @@ class _CategoryPageState extends State<CategoryPage> {
             ),
           ),
 
-          // ==============================
-          // ডান দিকের অংশ (Firebase Real Products)
-          // ==============================
+          // ডান দিকের রিয়েল প্রোডাক্ট গ্রিড
           Expanded(
             child: Container(
-              color: Colors.white,
-              padding: const EdgeInsets.all(15),
+              color: Colors.white, padding: const EdgeInsets.all(15),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    '${mainCategories[_selectedCategoryIndex]} Products',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
+                  Text('${mainCategories[_selectedCategoryIndex]['name']} Products', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 15),
-
-                  // ফায়ারবেস থেকে ডাটা আনার ম্যাজিক
                   Expanded(
                     child: StreamBuilder(
-                      // শুধু এপ্রুভ করা এবং সিলেক্ট করা ক্যাটাগরির প্রোডাক্ট খুঁজবে
                       stream: FirebaseFirestore.instance.collection('products')
                           .where('status', isEqualTo: 'approved')
-                          .where('category', isEqualTo: mainCategories[_selectedCategoryIndex])
+                          .where('category', isEqualTo: mainCategories[_selectedCategoryIndex]['name']) // ক্যাটাগরির নাম ম্যাচ করানো হলো
                           .snapshots(),
                       builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                        if (snapshot.connectionState == ConnectionState.waiting) {
-                          return const Center(child: CircularProgressIndicator());
-                        }
-                        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                          return Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children:[
-                                Icon(Icons.production_quantity_limits, size: 50, color: Colors.grey.shade300),
-                                const SizedBox(height: 10),
-                                const Text('No products found here yet!', style: TextStyle(color: Colors.grey)),
-                              ],
-                            ),
-                          );
-                        }
-
-                        var docs = snapshot.data!.docs;
+                        if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+                        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(Icons.production_quantity_limits, size: 50, color: Colors.grey.shade300), const SizedBox(height: 10), const Text('No products found here yet!', style: TextStyle(color: Colors.grey))]));
 
                         return GridView.builder(
-                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: gridColumns,
-                            childAspectRatio: 0.70, // কার্ডের উচ্চতা একটু বাড়ানো হয়েছে
-                            crossAxisSpacing: 10,
-                            mainAxisSpacing: 10,
-                          ),
-                          itemCount: docs.length,
-                          itemBuilder: (context, index) {
-                            return _buildRealProductCard(context, docs[index]);
-                          },
+                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: gridColumns, childAspectRatio: 0.70, crossAxisSpacing: 10, mainAxisSpacing: 10),
+                          itemCount: snapshot.data!.docs.length,
+                          itemBuilder: (context, index) { return _buildRealProductCard(context, snapshot.data!.docs[index]); },
                         );
                       }
                     ),
@@ -2120,65 +2416,791 @@ class _CategoryPageState extends State<CategoryPage> {
     String firstImage = images.isNotEmpty ? images[0] : '';
     
     bool isFlashSale = data.containsKey('is_flash_sale') ? data['is_flash_sale'] : false;
-    String displayPrice = isFlashSale && data.containsKey('discount_price') && data['discount_price'].toString().isNotEmpty 
-        ? data['discount_price'].toString() 
-        : data['price'].toString();
+    String displayPrice = isFlashSale && data.containsKey('discount_price') && data['discount_price'].toString().isNotEmpty ? data['discount_price'].toString() : data['price'].toString();
 
     int currentPrice = int.tryParse(displayPrice) ?? 0;
     int originalPrice = int.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : '0') ?? 0;
     int discountPercent = 0;
-    if (originalPrice > currentPrice) {
-      discountPercent = (((originalPrice - currentPrice) / originalPrice) * 100).round();
-    }
+    if (originalPrice > currentPrice) discountPercent = (((originalPrice - currentPrice) / originalPrice) * 100).round();
 
     return InkWell(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: product))),
       child: Container(
         decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
-          Expanded(
-            child: Stack(
-              children:[
-                Container(
-                  width: double.infinity, 
-                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), 
-                  child: firstImage.isNotEmpty 
-                      ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(10)), child: Image.network(firstImage, fit: BoxFit.cover)) 
-                      : const Center(child: Icon(Icons.image, size: 50, color: Colors.grey))
-                ),
-                if (discountPercent > 0)
-                  Positioned(
-                    top: 0, right: 0,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: const BoxDecoration(color: Colors.red, borderRadius: BorderRadius.only(topRight: Radius.circular(10), bottomLeft: Radius.circular(10))),
-                      child: Text('-$discountPercent%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
-                    ),
-                  ),
-              ],
-            )
-          ), 
-          Padding(
-            padding: const EdgeInsets.all(10.0), 
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start, 
-              children:[
-                Text(data['product_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis), 
-                const SizedBox(height: 5), 
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children:[
-                    Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14)),
-                    const SizedBox(width: 5),
-                    if (discountPercent > 0)
-                      Text('৳$originalPrice', style: const TextStyle(color: Colors.grey, decoration: TextDecoration.lineThrough, fontSize: 10)),
-                  ],
-                )
-              ]
-            )
-          )
+          Expanded(child: Stack(children:[Container(width: double.infinity, decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), child: firstImage.isNotEmpty ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(10)), child: Image.network(firstImage, fit: BoxFit.cover)) : const Center(child: Icon(Icons.image, size: 50, color: Colors.grey))), if (discountPercent > 0) Positioned(top: 0, right: 0, child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: const BoxDecoration(color: Colors.red, borderRadius: BorderRadius.only(topRight: Radius.circular(10), bottomLeft: Radius.circular(10))), child: Text('-$discountPercent%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))])), 
+          Padding(padding: const EdgeInsets.all(10.0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text(data['product_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis), const SizedBox(height: 5), Row(crossAxisAlignment: CrossAxisAlignment.end, children:[Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14)), const SizedBox(width: 5), if (discountPercent > 0) Text('৳$originalPrice', style: const TextStyle(color: Colors.grey, decoration: TextDecoration.lineThrough, fontSize: 10))])]))
         ]),
       ),
+    );
+  }
+}
+
+// ==========================================
+// কাস্টমার লোকেশন সেটআপ পেজ (Map Pin + Dropdown)
+// ==========================================
+class AddressSetupPage extends StatefulWidget {
+  const AddressSetupPage({super.key});
+
+  @override
+  State<AddressSetupPage> createState() => _AddressSetupPageState();
+}
+
+class _AddressSetupPageState extends State<AddressSetupPage> {
+  LatLng _currentPosition = const LatLng(23.6062, 90.1345); // ডিফল্ট দোহারের লোকেশন
+  GoogleMapController? _mapController;
+  
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _phoneController = TextEditingController();
+  final TextEditingController _landmarkController = TextEditingController(); // বাড়ির নাম/ল্যান্ডমার্ক
+
+  // ড্রপডাউনের জন্য ভেরিয়েবল
+  String? selectedThana;
+  String? selectedUnion;
+
+  // গ্রাম এখন আর ড্রপডাউন হবে না, কাস্টমার টাইপ করবে
+  final TextEditingController _villageController = TextEditingController(); 
+  
+  // আমাদের ডাটাবেস (শুধুমাত্র থানা এবং ইউনিয়ন)
+  final Map<String, List<String>> locationData = {
+    'দোহার':[
+      'দোহার পৌরসভা', 'কুসুমহাটি', 'সুতারপাড়া', 'নয়াবাড়ী', 
+      'নারিশা', 'বিলাসপুর', 'মাহমুদপুর', 'মুকসুদপুর', 'রাইপাড়া'
+    ],
+    'নবাবগঞ্জ':[
+      'নবাবগঞ্জ সদর', 'বান্দুরা', 'আগলা', 'চুড়াইন', 'শোল্লা', 'কলাকোপা', 'গালিমপুর'
+    ],
+    'শ্রীনগর':[
+      'শ্রীনগর সদর', 'হাঁসাড়া', 'ভাগ্যকুল', 'বাড়ৈখালী', 'তন্তর'
+    ]
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _getUserCurrentLocation(); 
+  }
+
+  Future<void> _getUserCurrentLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+    Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+    setState(() {
+      _currentPosition = LatLng(position.latitude, position.longitude);
+    });
+    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_currentPosition, 16));
+  }
+
+  // ম্যাপ টানলে শুধু স্থানাঙ্ক (Lat/Lng) সেভ হবে, কোনো টেক্সট খুঁজবে না
+  void _onCameraMove(CameraPosition position) {
+    _currentPosition = position.target;
+  }
+
+  void saveAddress() async {
+    if (_nameController.text.isEmpty || _phoneController.text.isEmpty || 
+        selectedThana == null || selectedUnion == null || _villageController.text.trim().isEmpty || 
+        _landmarkController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে সব তথ্য সঠিকভাবে দিন!')));
+      return;
+    }
+
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      showDialog(context: context, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+      String fullAddress = '${_landmarkController.text.trim()}, গ্রাম: ${_villageController.text.trim()}, ইউনিয়ন: $selectedUnion, থানা: $selectedThana, ঢাকা।';
+
+      // চেক করা হচ্ছে ইউজারের আগে কোনো ঠিকানা আছে কি না
+      var addressRef = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('addresses');
+      var existingAddresses = await addressRef.limit(1).get();
+      
+      // যদি আগে কোনো ঠিকানা না থাকে, তবে এটিই অটোমেটিক ডিফল্ট হয়ে যাবে
+      bool isFirstAddress = existingAddresses.docs.isEmpty;
+
+      // এখন ডাটা 'addresses' সাব-কালেকশনে সেভ হচ্ছে
+      await addressRef.add({
+        'shipping_name': _nameController.text.trim(),
+        'shipping_phone': _phoneController.text.trim(),
+        'shipping_address_text': fullAddress, 
+        'latitude': _currentPosition.latitude,
+        'longitude': _currentPosition.longitude,
+        'is_default': isFirstAddress, // প্রথমবার true হবে
+        'created_at': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      Navigator.pop(context); 
+      Navigator.pop(context); 
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('নতুন ঠিকানা সফলভাবে সেভ হয়েছে! 📍')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.deepOrange,
+        title: const Text('Set Delivery Location', style: TextStyle(color: Colors.white, fontSize: 18)),
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pop(context)),
+      ),
+      body: Column(
+        children:[
+          // উপরের অর্ধেক: ম্যাপ (শুধু পিন ড্রপের জন্য)
+          Expanded(
+            flex: 2,
+            child: Stack(
+              alignment: Alignment.center,
+              children:[
+                GoogleMap(
+                  initialCameraPosition: CameraPosition(target: _currentPosition, zoom: 15),
+                  onMapCreated: (GoogleMapController controller) => _mapController = controller,
+                  onCameraMove: _onCameraMove,
+                  myLocationEnabled: false, 
+                  myLocationButtonEnabled: false, 
+                  zoomControlsEnabled: false,
+                  mapToolbarEnabled: false,
+                ),
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 35.0), 
+                  child: Icon(Icons.location_on, size: 50, color: Colors.deepOrange),
+                ),
+                Positioned(
+                  top: 10,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+                    decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
+                    child: const Text('ম্যাপ টেনে আপনার বাড়ির ওপর পিন রাখুন', style: TextStyle(color: Colors.white, fontSize: 12)),
+                  ),
+                ),
+                Positioned(
+                  bottom: 15, right: 15,
+                  child: FloatingActionButton(
+                    mini: true,
+                    backgroundColor: Colors.white,
+                    onPressed: _getUserCurrentLocation,
+                    child: const Icon(Icons.my_location, color: Colors.blue),
+                  ),
+                )
+              ],
+            ),
+          ),
+
+          // নিচের অর্ধেক: ড্রপডাউন ও ফর্ম
+          Expanded(
+            flex: 4,
+            child: Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(color: Colors.white, boxShadow:[BoxShadow(color: Colors.grey.shade300, blurRadius: 10, offset: const Offset(0, -5))], borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children:[
+                    Row(
+                      children:[
+                        Expanded(child: TextField(controller: _nameController, decoration: const InputDecoration(labelText: 'আপনার নাম', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)))),
+                        const SizedBox(width: 10),
+                        Expanded(child: TextField(controller: _phoneController, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'ফোন নম্বর', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)))),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    
+                    // ১. থানা ড্রপডাউন
+                    DropdownButtonFormField<String>(
+                      decoration: const InputDecoration(labelText: 'থানা / উপজেলা', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)),
+                      value: selectedThana,
+                      items: locationData.keys.map((String thana) {
+                        return DropdownMenuItem<String>(value: thana, child: Text(thana));
+                      }).toList(),
+                      onChanged: (newValue) {
+                        setState(() {
+                          selectedThana = newValue;
+                          selectedUnion = null; // থানা পাল্টলে ইউনিয়ন রিসেট হবে
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 10),
+
+                    // ২. ইউনিয়ন ড্রপডাউন
+                    DropdownButtonFormField<String>(
+                      decoration: const InputDecoration(labelText: 'ইউনিয়ন / পৌরসভা', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)),
+                      value: selectedUnion,
+                      items: selectedThana == null ? [] : locationData[selectedThana]!.map((String union) {
+                        return DropdownMenuItem<String>(value: union, child: Text(union));
+                      }).toList(),
+                      onChanged: (newValue) {
+                        setState(() { selectedUnion = newValue; });
+                      },
+                    ),
+                    const SizedBox(height: 10),
+
+                    // ৩. গ্রাম / পাড়ার নাম (ইউজার নিজে টাইপ করবে)
+                    TextField(
+                      controller: _villageController, 
+                      decoration: const InputDecoration(labelText: 'গ্রাম / পাড়া / মহল্লা', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10))
+                    ),
+                    const SizedBox(height: 10),
+
+                    // ৪. ল্যান্ডমার্ক বা বাড়ির নাম
+                    TextField(
+                      controller: _landmarkController, 
+                      decoration: const InputDecoration(labelText: 'বাড়ির নাম বা ল্যান্ডমার্ক (যেমন: মসজিদের পাশে)', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10))
+                    ),
+                    const SizedBox(height: 20),
+
+                    SizedBox(
+                      width: double.infinity, height: 50,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                        icon: const Icon(Icons.save, color: Colors.white), label: const Text('SAVE ADDRESS', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                        onPressed: saveAddress,
+                      ),
+                    )
+                  ],
+                ),
+              ),
+            ),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+// ==========================================
+// ইউজারের সকল ঠিকানার লিস্ট পেজ (Address Management)
+// ==========================================
+class AddressListPage extends StatefulWidget {
+  const AddressListPage({super.key});
+
+  @override
+  State<AddressListPage> createState() => _AddressListPageState();
+}
+
+class _AddressListPageState extends State<AddressListPage> {
+  User? user = FirebaseAuth.instance.currentUser;
+
+  // ডিফল্ট ঠিকানা সেট করার ফাংশন
+  void setDefaultAddress(String addressId) async {
+    if (user == null) return;
+    showDialog(context: context, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+    // ইউজারের সব ঠিকানা নিয়ে আসা
+    var snapshot = await FirebaseFirestore.instance.collection('users').doc(user!.uid).collection('addresses').get();
+    
+    // Batch Write এর মাধ্যমে যেটিতে ক্লিক করেছে সেটিকে True এবং বাকিগুলোকে False করে দেওয়া
+    var batch = FirebaseFirestore.instance.batch();
+    for (var doc in snapshot.docs) {
+      batch.update(doc.reference, {'is_default': doc.id == addressId});
+    }
+    await batch.commit();
+
+    if (!mounted) return;
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ডিফল্ট ঠিকানা আপডেট হয়েছে! ✅')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (user == null) return const Scaffold(body: Center(child: Text('Please login')));
+
+    return Scaffold(
+      backgroundColor: Colors.grey[100],
+      appBar: AppBar(
+        title: const Text('My Addresses', style: TextStyle(color: Colors.white)),
+        backgroundColor: Colors.deepOrange,
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pop(context)),
+      ),
+      body: StreamBuilder(
+        stream: FirebaseFirestore.instance.collection('users').doc(user!.uid).collection('addresses').orderBy('created_at', descending: true).snapshots(),
+        builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return const Center(child: Text('আপনার কোনো ঠিকানা সেভ করা নেই।', style: TextStyle(color: Colors.grey, fontSize: 16)));
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(15),
+            itemCount: snapshot.data!.docs.length,
+            itemBuilder: (context, index) {
+              var doc = snapshot.data!.docs[index];
+              bool isDefault = doc['is_default'] ?? false;
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 15),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                  side: BorderSide(color: isDefault ? Colors.teal : Colors.transparent, width: 2) // ডিফল্ট হলে সুন্দর বর্ডার দেখাবে
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(15.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children:[
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children:[
+                          Row(
+                            children:[
+                              const Icon(Icons.person, color: Colors.grey, size: 18),
+                              const SizedBox(width: 5),
+                              Text(doc['shipping_name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                            ],
+                          ),
+                          if (isDefault) 
+                            Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: Colors.teal.shade50, borderRadius: BorderRadius.circular(5)), child: const Text('Default', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold, fontSize: 12))),
+                        ],
+                      ),
+                      const SizedBox(height: 5),
+                      Row(children:[const Icon(Icons.phone, color: Colors.grey, size: 16), const SizedBox(width: 5), Text(doc['shipping_phone'], style: const TextStyle(color: Colors.black87))]),
+                      const SizedBox(height: 10),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children:[
+                          const Icon(Icons.location_on, color: Colors.red, size: 18), const SizedBox(width: 5),
+                          Expanded(child: Text(doc['shipping_address_text'], style: const TextStyle(color: Colors.black54, height: 1.4))),
+                        ],
+                      ),
+                      const Divider(height: 25),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children:[
+                          // ডিফল্ট সেট করার বাটন
+                          if (!isDefault)
+                            TextButton.icon(
+                              onPressed: () => setDefaultAddress(doc.id),
+                              icon: const Icon(Icons.check_circle_outline, color: Colors.teal),
+                              label: const Text('Set as Default', style: TextStyle(color: Colors.teal)),
+                            )
+                          else 
+                            const SizedBox(), // ডিফল্ট হলে বাটন দেখাবে না
+                          
+                          // ডিলিট বাটন
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline, color: Colors.red),
+                            onPressed: () {
+                              FirebaseFirestore.instance.collection('users').doc(user!.uid).collection('addresses').doc(doc.id).delete();
+                            },
+                          )
+                        ],
+                      )
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        }
+      ),
+      // নতুন ঠিকানা যুক্ত করার Floating Button
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: Colors.deepOrange,
+        icon: const Icon(Icons.add_location_alt, color: Colors.white),
+        label: const Text('Add New Address', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        onPressed: () {
+          Navigator.push(context, MaterialPageRoute(builder: (context) => const AddressSetupPage()));
+        },
+      ),
+    );
+  }
+}
+
+// ==========================================
+// কাস্টমারের অর্ডার হিস্ট্রি পেজ (Order Tracking)
+// ==========================================
+class OrderHistoryPage extends StatelessWidget {
+  const OrderHistoryPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return const Scaffold(body: Center(child: Text('Please login')));
+
+    return DefaultTabController(
+      length: 4, // ৪টি ট্যাব থাকবে
+      child: Scaffold(
+        backgroundColor: Colors.grey[100],
+        appBar: AppBar(
+          title: const Text('My Orders', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          backgroundColor: Colors.deepOrange,
+          leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pop(context)),
+          bottom: const TabBar(
+            isScrollable: true,
+            labelColor: Colors.white,
+            unselectedLabelColor: Colors.white70,
+            indicatorColor: Colors.white,
+            tabs:[
+              Tab(text: 'All Orders'),
+              Tab(text: 'Pending'),
+              Tab(text: 'Shipped'),
+              Tab(text: 'Delivered'),
+            ],
+          ),
+        ),
+        
+        // ফায়ারবেস থেকে ইউজারের সব অর্ডার নিয়ে আসা হচ্ছে (নতুনগুলো আগে)
+        body: StreamBuilder(
+          stream: FirebaseFirestore.instance
+              .collection('orders')
+              .where('user_id', isEqualTo: user.uid)
+              .orderBy('order_date', descending: true)
+              .snapshots(),
+          builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+            if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children:[
+                    Icon(Icons.receipt_long, size: 60, color: Colors.grey.shade300),
+                    const SizedBox(height: 10),
+                    const Text('No orders found!', style: TextStyle(color: Colors.grey, fontSize: 16)),
+                  ]
+                )
+              );
+            }
+
+            var allOrders = snapshot.data!.docs;
+
+            return TabBarView(
+              children:[
+                _buildOrderList(allOrders), // সব অর্ডার
+                _buildOrderList(allOrders.where((doc) => doc['status'] == 'Pending').toList()), // শুধু পেন্ডিং
+                _buildOrderList(allOrders.where((doc) => doc['status'] == 'Shipped').toList()), // শুধু শিপড
+                _buildOrderList(allOrders.where((doc) => doc['status'] == 'Delivered').toList()), // শুধু ডেলিভারড
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  // অর্ডার লিস্ট ডিজাইনের হেল্পার ফাংশন
+  Widget _buildOrderList(List<QueryDocumentSnapshot> orders) {
+    if (orders.isEmpty) {
+      return const Center(child: Text('No orders in this status.', style: TextStyle(color: Colors.grey)));
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(15),
+      itemCount: orders.length,
+      itemBuilder: (context, index) {
+        var order = orders[index];
+        Map<String, dynamic> data = order.data() as Map<String, dynamic>;
+        List<dynamic> items = data['items'] ??[];
+        
+        // তারিখ বের করা
+        String dateString = 'Unknown Date';
+        if (data['order_date'] != null) {
+          DateTime date = (data['order_date'] as Timestamp).toDate();
+          // সহজ ফরম্যাট: দিন/মাস/বছর
+          dateString = '${date.day}/${date.month}/${date.year}';
+        }
+
+        // স্ট্যাটাস অনুযায়ী কালার চেঞ্জ
+        Color statusColor = Colors.orange; // Pending এর জন্য কমলা
+        if (data['status'] == 'Shipped') statusColor = Colors.blue;
+        if (data['status'] == 'Delivered') statusColor = Colors.green;
+        if (data['status'] == 'Cancelled') statusColor = Colors.red;
+
+        return Card(
+          margin: const EdgeInsets.only(bottom: 15),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          child: Padding(
+            padding: const EdgeInsets.all(15.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                // হেডার (Order ID ও স্ট্যাটাস)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children:[
+                    Text('Order ID: ${order.id.substring(0, 8).toUpperCase()}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                      decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+                      child: Text(data['status'], style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text('Date: $dateString', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                const Divider(height: 20),
+                
+                // অর্ডার করা আইটেমগুলোর লিস্ট
+                ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: items.length,
+                  itemBuilder: (context, i) {
+                    var item = items[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 5.0),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children:[
+                          Expanded(child: Text('${item['quantity']}x ${item['product_name']}', maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          Text('৳${item['price']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    );
+                  }
+                ),
+                
+                const Divider(height: 20),
+                
+                // ফুটার (Total Amount)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children:[
+                    const Text('Total Amount', style: TextStyle(fontWeight: FontWeight.bold)),
+                    Text('৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 16)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ==========================================
+// কাস্টমার উইশলিস্ট পেজ (Favorite Products)
+// ==========================================
+class WishlistPage extends StatelessWidget {
+  const WishlistPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return const Scaffold(body: Center(child: Text('Please login')));
+
+    double screenWidth = MediaQuery.of(context).size.width;
+    int gridColumns = screenWidth > 1200 ? 6 : (screenWidth > 800 ? 4 : 2);
+
+    return Scaffold(
+      backgroundColor: Colors.grey[100],
+      appBar: AppBar(
+        title: const Text('My Wishlist', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.deepOrange,
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pop(context)),
+      ),
+      body: StreamBuilder(
+        // ফায়ারবেস থেকে ইউজারের সেভ করা উইশলিস্ট আনা হচ্ছে
+        stream: FirebaseFirestore.instance.collection('users').doc(user.uid).collection('wishlist').snapshots(),
+        builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children:[
+                  Icon(Icons.favorite_border, size: 80, color: Colors.grey.shade300),
+                  const SizedBox(height: 10),
+                  const Text('Your wishlist is empty!', style: TextStyle(color: Colors.grey, fontSize: 16)),
+                ]
+              )
+            );
+          }
+
+          var docs = snapshot.data!.docs;
+
+          return Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 1200),
+              child: GridView.builder(
+                padding: const EdgeInsets.all(15),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: gridColumns,
+                  childAspectRatio: 0.70,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                ),
+                itemCount: docs.length,
+                itemBuilder: (context, index) {
+                  var product = docs[index];
+                  Map<String, dynamic> data = product.data() as Map<String, dynamic>;
+                  List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] :[];
+                  String firstImage = images.isNotEmpty ? images[0] : '';
+                  
+                  String displayPrice = data.containsKey('discount_price') && data['discount_price'].toString().isNotEmpty 
+                      ? data['discount_price'].toString() : data['price'].toString();
+
+                  return InkWell(
+                    // উইশলিস্ট থেকে ক্লিক করলে আবার প্রোডাক্ট ডিটেইলস পেজে নিয়ে যাবে
+                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: product))),
+                    child: Container(
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start, 
+                        children:[
+                          Expanded(
+                            child: Stack(
+                              children:[
+                                Container(
+                                  width: double.infinity, 
+                                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), 
+                                  child: firstImage.isNotEmpty ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(10)), child: Image.network(firstImage, fit: BoxFit.cover)) : const Center(child: Icon(Icons.image, size: 50, color: Colors.grey))
+                                ),
+                                // ডিলিট বাটন
+                                Positioned(
+                                  top: 5, right: 5,
+                                  child: InkWell(
+                                    onTap: () {
+                                      FirebaseFirestore.instance.collection('users').doc(user.uid).collection('wishlist').doc(product.id).delete();
+                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Removed from Wishlist')));
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.all(5),
+                                      decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                                      child: const Icon(Icons.delete, color: Colors.red, size: 18),
+                                    )
+                                  )
+                                )
+                              ]
+                            )
+                          ), 
+                          Padding(
+                            padding: const EdgeInsets.all(10.0), 
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
+                              Text(data['product_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13), maxLines: 2, overflow: TextOverflow.ellipsis), 
+                              const SizedBox(height: 5), 
+                              Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 15))
+                            ])
+                          )
+                        ]
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ==========================================
+// Admin Banner Upload Page (Firebase Storage)
+// ==========================================
+class AdminBannerUploadPage extends StatefulWidget {
+  const AdminBannerUploadPage({super.key});
+  @override
+  State<AdminBannerUploadPage> createState() => _AdminBannerUploadPageState();
+}
+
+class _AdminBannerUploadPageState extends State<AdminBannerUploadPage> {
+  final ImagePicker _picker = ImagePicker();
+
+  Future<void> uploadBanner() async {
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    if (image == null) return;
+
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+      
+      String fileName = 'banner_${DateTime.now().millisecondsSinceEpoch}_${image.name}';
+      Reference ref = FirebaseStorage.instance.ref().child('banners').child(fileName);
+      
+      if (kIsWeb) {
+        Uint8List bytes = await image.readAsBytes();
+        await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
+      } else {
+        await ref.putFile(File(image.path));
+      }
+      
+      String downloadUrl = await ref.getDownloadURL();
+
+      await FirebaseFirestore.instance.collection('banners').add({
+        'image_url': downloadUrl,
+        'uploaded_at': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Banner Uploaded Successfully! 🎉')));
+    } catch (e) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Manage Banners'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
+      body: Column(
+        children:[
+          Padding(
+            padding: const EdgeInsets.all(15.0),
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, minimumSize: const Size(double.infinity, 50)),
+              onPressed: uploadBanner, 
+              icon: const Icon(Icons.add_photo_alternate, color: Colors.white), 
+              label: const Text('Upload New Banner', style: TextStyle(color: Colors.white, fontSize: 16))
+            ),
+          ),
+          const Expanded(
+            child: BannerList(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class BannerList extends StatelessWidget {
+  const BannerList({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder(
+      stream: FirebaseFirestore.instance.collection('banners').orderBy('uploaded_at', descending: true).snapshots(),
+      builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('No banners uploaded yet.'));
+
+        return ListView.builder(
+          padding: const EdgeInsets.all(15),
+          itemCount: snapshot.data!.docs.length,
+          itemBuilder: (context, index) {
+            var doc = snapshot.data!.docs[index];
+            return Card(
+              margin: const EdgeInsets.only(bottom: 15),
+              child: Column(
+                children:[
+                  Container(
+                    height: 150, width: double.infinity,
+                    decoration: BoxDecoration(
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
+                      image: DecorationImage(image: NetworkImage(doc['image_url']), fit: BoxFit.cover)
+                    ),
+                  ),
+                  Container(
+                    color: Colors.grey.shade100,
+                    child: IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () {
+                        FirebaseFirestore.instance.collection('banners').doc(doc.id).delete();
+                      },
+                    ),
+                  )
+                ],
+              ),
+            );
+          },
+        );
+      }
     );
   }
 }
