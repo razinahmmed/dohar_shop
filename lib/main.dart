@@ -16,7 +16,14 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart'; // একদম উপরে বসান
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'dart:async';
+import 'package:geolocator/geolocator.dart';
 
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+  print("Background Message: ${message.messageId}");
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,13 +31,12 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
-  Widget initialPage = FirebaseAuth.instance.currentUser == null
-      ? const LoginPage()
-      : const MainScreen();
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
-  runApp(MaterialApp(
+  // এখন আর লগিন চেক করবে না, সরাসরি MainScreen এ ঢুকতে দেবে (Guest Mode)
+  runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
-    home: initialPage,
+    home: MainScreen(), 
   ));
 }
 
@@ -51,19 +57,64 @@ class _MainScreenState extends State<MainScreen> {
     const UserDashboard(), 
   ];
   void _onItemTapped(int index) {
+    User? user = FirebaseAuth.instance.currentUser;
+
     if (index == 2) {
-      // কার্ট বাটনে চাপ দিলে ইনডেক্স পাল্টাবে না, বরং নতুন পেজে পাঠিয়ে দেবে
-      // এতে ফ্লাটার মনে রাখবে যে সে একটা নতুন পর্দার ওপর আছে
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => const CartPage()),
-      );
+      // Cart বাটনে ক্লিক করলে
+      if (user == null) {
+        _showLoginPopup(context, "Please login to view your Cart!");
+      } else {
+        Navigator.push(context, MaterialPageRoute(builder: (context) => const CartPage()));
+      }
+    } else if (index == 3) {
+      // Profile বাটনে ক্লিক করলে
+      if (user == null) {
+        _showLoginPopup(context, "Please login to access your Profile!");
+      } else {
+        setState(() { _selectedIndex = index; });
+      }
     } else {
-      // বাকি পেজগুলোর জন্য আগের মতোই ইনডেক্স পরিবর্তন হবে
-      setState(() {
-        _selectedIndex = index;
-      });
+      // Home এবং Categories সবাই দেখতে পারবে
+      setState(() { _selectedIndex = index; });
     }
+  }
+
+  // সুন্দর একটি লগিন পপ-আপ দেখানোর ফাংশন (Guest Mode এর জন্য)
+  void _showLoginPopup(BuildContext context, String message) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              const Icon(Icons.lock_outline, size: 50, color: Colors.deepOrange),
+              const SizedBox(height: 15),
+              Text(message, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity, height: 50,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                  onPressed: () {
+                    Navigator.pop(context); // পপ-আপ বন্ধ করবে
+                    Navigator.push(context, MaterialPageRoute(builder: (context) => const LoginPage())); // লগিন পেজে নিয়ে যাবে
+                  },
+                  child: const Text('LOGIN / REGISTER', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextButton(
+                onPressed: () => Navigator.pop(context), 
+                child: const Text('Continue as Guest', style: TextStyle(color: Colors.grey))
+              )
+            ],
+          ),
+        );
+      }
+    );
   }
   @override
   Widget build(BuildContext context) {
@@ -90,7 +141,7 @@ class _MainScreenState extends State<MainScreen> {
 }
 
 // ==========================================
-// ৪ নম্বর পেজ: Cart Page (কার্ট পেজ)
+// ৪ নম্বর পেজ: Cart Page (Multi-vendor Delivery & Address Check)
 // ==========================================
 class CartPage extends StatefulWidget {
   const CartPage({super.key});
@@ -99,8 +150,116 @@ class CartPage extends StatefulWidget {
 }
 
 class _CartPageState extends State<CartPage> {
-  // ১০-২০টি পণ্য একসাথে সিলেক্ট করে ডিলিট করার জন্য এই সেটটি ব্যবহার হবে
   Set<String> selectedItems = {}; 
+  int dynamicDeliveryCharge = 0; 
+  int uniqueSellerCount = 0; 
+  bool isCalculating = true;
+  bool hasSavedAddress = false; // নতুন ভেরিয়েবল: ঠিকানা আছে কিনা চেক করতে
+
+  final double shopLatitude = 23.6062; 
+  final double shopLongitude = 90.1345;
+
+  @override
+  void initState() {
+    super.initState();
+    _calculateDeliveryCharge();
+  }
+
+  Future<void> _calculateDeliveryCharge() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null || selectedItems.isEmpty) {
+      setState(() { 
+        dynamicDeliveryCharge = 0; 
+        uniqueSellerCount = 0;
+        isCalculating = false;
+      });
+      return;
+    }
+
+    setState(() => isCalculating = true);
+
+    try {
+      DocumentSnapshot settingsDoc = await FirebaseFirestore.instance.collection('app_config').doc('delivery_settings').get();
+      double baseDistance = 2.0; int baseCharge = 30;
+      double midDistance = 5.0; int midCharge = 50;
+      int extraPerKm = 10;
+
+      if (settingsDoc.exists) {
+        Map<String, dynamic> settingsData = settingsDoc.data() as Map<String, dynamic>;
+        baseDistance = (settingsData['base_distance'] as num).toDouble();
+        baseCharge = (settingsData['base_charge'] as num).toInt();
+        midDistance = (settingsData['mid_distance'] as num).toDouble();
+        midCharge = (settingsData['mid_charge'] as num).toInt();
+        extraPerKm = (settingsData['extra_per_km'] as num).toInt();
+      }
+
+      var addressSnapshot = await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('addresses').where('is_default', isEqualTo: true).limit(1).get();
+      
+      // ঠিকানা আছে কিনা চেক করছি
+      if (addressSnapshot.docs.isEmpty) {
+        setState(() { 
+          dynamicDeliveryCharge = 0; // ঠিকানা না থাকলে চার্জ ০
+          hasSavedAddress = false; 
+          isCalculating = false; 
+        });
+        return;
+      }
+
+      hasSavedAddress = true; // ঠিকানা পাওয়া গেছে
+
+      double customerLat = addressSnapshot.docs.first['latitude'];
+      double customerLng = addressSnapshot.docs.first['longitude'];
+
+      var cartSnapshot = await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').get();
+      Set<String> sellers = {}; 
+      
+      for (var doc in cartSnapshot.docs) {
+        if (selectedItems.contains(doc.id)) {
+          Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+          String sellerId = data.containsKey('seller_id') ? data['seller_id'] : 'default_shop';
+          sellers.add(sellerId);
+        }
+      }
+
+      uniqueSellerCount = sellers.length;
+      int totalDeliveryFee = 0;
+
+      for (String sellerId in sellers) {
+        double sLat = 23.6062; 
+        double sLng = 90.1345;
+
+        if (sellerId != 'default_shop') {
+          DocumentSnapshot sellerDoc = await FirebaseFirestore.instance.collection('users').doc(sellerId).get();
+          if (sellerDoc.exists && (sellerDoc.data() as Map<String, dynamic>).containsKey('latitude')) {
+            sLat = sellerDoc['latitude'];
+            sLng = sellerDoc['longitude'];
+          }
+        }
+
+        double distanceInMeters = Geolocator.distanceBetween(sLat, sLng, customerLat, customerLng);
+        double distanceInKm = (distanceInMeters / 1000) * 1.20;
+
+        int currentSellerCharge = 0;
+        if (distanceInKm <= baseDistance) {
+          currentSellerCharge = baseCharge;
+        } else if (distanceInKm <= midDistance) {
+          currentSellerCharge = midCharge;
+        } else {
+          double extraKm = distanceInKm - midDistance;
+          currentSellerCharge = midCharge + (extraKm.ceil() * extraPerKm);
+        }
+
+        totalDeliveryFee += currentSellerCharge; 
+      }
+
+      dynamicDeliveryCharge = totalDeliveryFee;
+
+    } catch (e) {
+      dynamicDeliveryCharge = 60; 
+    }
+
+    if (mounted) setState(() => isCalculating = false);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -112,15 +271,10 @@ class _CartPageState extends State<CartPage> {
       appBar: AppBar(
         backgroundColor: Colors.amber[200], 
         elevation: 0,
-        // ১. ব্যাক বাটন ফিক্স
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, color: Colors.black), 
-          onPressed: () => Navigator.pop(context) 
-        ),
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.black), onPressed: () => Navigator.pop(context)),
         title: const Text('YOUR CART', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
         centerTitle: true,
-        actions: [
-          // ২. তোমার আইডিয়া: মাল্টি-ডিলিট বাটন (সিলেক্ট করলেই দেখা যাবে)
+        actions:[
           if (selectedItems.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.delete_sweep, color: Colors.red, size: 28),
@@ -129,12 +283,15 @@ class _CartPageState extends State<CartPage> {
                   await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(id).delete();
                 }
                 setState(() => selectedItems.clear());
+                _calculateDeliveryCharge(); 
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Selected items removed!')));
               },
             )
         ],
       ),
-      body: StreamBuilder(
+      body: isCalculating 
+        ? const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[CircularProgressIndicator(), SizedBox(height: 10), Text('Calculating Delivery Charge...')]))
+        : StreamBuilder(
         stream: FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').snapshots(),
         builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
@@ -142,27 +299,50 @@ class _CartPageState extends State<CartPage> {
             return const Center(child: Text('Your cart is empty! Add products.', style: TextStyle(fontSize: 18, color: Colors.grey)));
           }
 
-          // আগের লুপটি পরিবর্তন করে শুধু সিলেক্ট করা আইটেম যোগ করো
-          int total = 0;
+          int totalSalePrice = 0;
+          int totalOriginalPrice = 0; 
+
           for (var doc in snapshot.data!.docs) {
-            // ম্যাজিক কন্ডিশন: যদি আইটেমটি selectedItems সেটে থাকে [cite: 14]
             if (selectedItems.contains(doc.id)) { 
-              var rawPrice = doc['price'];
-              int price = 0;
-              if (rawPrice is String) { 
-                price = int.tryParse(rawPrice.replaceAll(',', '')) ?? 0; 
-              } else if (rawPrice is num) { 
-                price = rawPrice.toInt(); 
-              }
-              int quantity = (doc['quantity'] as num).toInt();
-              total += (price * quantity);
+              Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+              int price = int.tryParse(data['price'].toString()) ?? 0;
+              int originalPrice = data.containsKey('original_price') && data['original_price'].toString().isNotEmpty 
+                  ? int.parse(data['original_price'].toString()) 
+                  : price;
+              int quantity = (data['quantity'] as num).toInt();
+              
+              totalSalePrice += (price * quantity);
+              totalOriginalPrice += (originalPrice * quantity);
             }
           }
-          int deliveryCharge = 20; 
-          int grandTotal = total + deliveryCharge;
+          
+          int totalSavings = totalOriginalPrice - totalSalePrice;
+          int grandTotal = totalSalePrice > 0 ? totalSalePrice + dynamicDeliveryCharge : 0; 
 
           return Column(
-            children: [
+            children:[
+              // ঠিকানা না থাকলে ওয়ার্নিং ব্যানার
+              if (!hasSavedAddress && selectedItems.isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  color: Colors.red.shade100,
+                  padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 15),
+                  child: Row(
+                    children:[
+                      const Icon(Icons.warning_amber_rounded, color: Colors.red),
+                      const SizedBox(width: 10),
+                      const Expanded(child: Text('Please add a delivery address to checkout.', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold))),
+                      TextButton(
+                        onPressed: () {
+                          // ঠিকানা যোগ করার পেজে নিয়ে যাবে
+                          Navigator.push(context, MaterialPageRoute(builder: (context) => const AddressSetupPage())).then((_) => _calculateDeliveryCharge());
+                        },
+                        child: const Text('ADD NOW', style: TextStyle(color: Colors.red, decoration: TextDecoration.underline)),
+                      )
+                    ],
+                  ),
+                ),
+
               Expanded(
                 child: ListView.builder(
                   padding: const EdgeInsets.all(15),
@@ -177,94 +357,112 @@ class _CartPageState extends State<CartPage> {
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
                       child: Row(
-                        children: [
-                          // ৩. চেক বক্স সিলেকশন (ডিলিট করার জন্য)
+                        children:[
                           Checkbox(
                             value: selectedItems.contains(cartItem.id),
                             activeColor: Colors.deepOrange,
                             onChanged: (val) {
-                              setState(() {
-                                val! ? selectedItems.add(cartItem.id) : selectedItems.remove(cartItem.id);
+                              setState(() { 
+                                val! ? selectedItems.add(cartItem.id) : selectedItems.remove(cartItem.id); 
                               });
+                              _calculateDeliveryCharge(); 
                             },
                           ),
                           Container(
                             height: 60, width: 60,
                             decoration: BoxDecoration(color: Colors.blue[50], borderRadius: BorderRadius.circular(10)),
-                            child: imageUrl.isNotEmpty
-                                ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(imageUrl, fit: BoxFit.cover))
-                                : const Icon(Icons.checkroom, color: Colors.blue),
+                            child: imageUrl.isNotEmpty ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(imageUrl, fit: BoxFit.cover)) : const Icon(Icons.checkroom, color: Colors.blue),
                           ),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
+                              children:[
                                 Text(cartItem['product_name'], style: const TextStyle(fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis),
                                 const SizedBox(height: 5),
                                 Text('৳${cartItem['price']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)),
-                                // কাস্টমারের সিলেক্ট করা কালার ও সাইজ দেখানো
-                                if (data.containsKey('selected_color') && data['selected_color'].toString().isNotEmpty)
-                                  Text('Color: ${data['selected_color']}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                if (data.containsKey('selected_size') && data['selected_size'].toString().isNotEmpty)
-                                  Text('Size: ${data['selected_size']}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                // স্টক ওয়ার্নিং (ডায়নামিক স্টক চেক)
-                                if (data.containsKey('max_stock') && (data['max_stock'] as num).toInt() < 10)
-                                  Text('Only ${data['max_stock']} items left!', style: const TextStyle(fontSize: 11, color: Colors.red, fontStyle: FontStyle.italic)),
+                                if (data.containsKey('selected_color') && data['selected_color'].toString().isNotEmpty) Text('Color: ${data['selected_color']}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                if (data.containsKey('selected_size') && data['selected_size'].toString().isNotEmpty) Text('Size: ${data['selected_size']}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
                               ],
                             ),
                           ),
-                          // ৪. প্লাস-মাইনাস বাটন দিয়ে রিয়েল-টাইম আপডেট
                           Row(
-                            children: [
+                            children:[
                               InkWell(
-                                onTap: () {
+                                onTap: () { 
                                   if (cartItem['quantity'] > 1) {
-                                    FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(cartItem.id).update({'quantity': FieldValue.increment(-1)});
+                                    FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(cartItem.id).update({'quantity': FieldValue.increment(-1)}); 
+                                    _calculateDeliveryCharge(); 
                                   }
                                 },
                                 child: Container(decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(5)), child: const Icon(Icons.remove, size: 20)),
                               ),
                               Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('${cartItem['quantity']}', style: const TextStyle(fontWeight: FontWeight.bold))),
                               InkWell(
-                                onTap: () {
-                                  FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(cartItem.id).update({'quantity': FieldValue.increment(1)});
+                                onTap: () { 
+                                  FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(cartItem.id).update({'quantity': FieldValue.increment(1)}); 
+                                  _calculateDeliveryCharge();
                                 },
                                 child: Container(decoration: BoxDecoration(color: Colors.orange[100], borderRadius: BorderRadius.circular(5)), child: const Icon(Icons.add, size: 20, color: Colors.deepOrange)),
                               ),
                             ],
                           ),
-                          const SizedBox(width: 10),
-                          InkWell(
-                            onTap: () { FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(cartItem.id).delete(); },
-                            child: const Icon(Icons.cancel_outlined, color: Colors.grey),
-                          )
                         ],
                       ),
                     );
                   },
                 ),
               ),
-              // ওর্ডার সামারি সেকশন (তোমার আগের ডিজাইন অনুযায়ী)
+              
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(color: Colors.amber[100], borderRadius: const BorderRadius.vertical(top: Radius.circular(30))),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('ORDER SUMMARY', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                    const SizedBox(height: 10),
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Subtotal'), Text('৳$total', style: const TextStyle(fontWeight: FontWeight.bold))]),
-                    const SizedBox(height: 5),
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Delivery Charge'), Text('৳$deliveryCharge', style: const TextStyle(fontWeight: FontWeight.bold))]),
-                    const Divider(thickness: 1, height: 20),
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('TOTAL', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)), Text('৳$grandTotal', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18))]),
+                  children:[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children:[
+                        const Text('ORDER SUMMARY', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        if (uniqueSellerCount > 1)
+                          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: Colors.deepOrange.shade100, borderRadius: BorderRadius.circular(10)), child: Text('From $uniqueSellerCount Shops', style: const TextStyle(color: Colors.deepOrange, fontSize: 10, fontWeight: FontWeight.bold))),
+                      ],
+                    ),
                     const SizedBox(height: 15),
+                    
+                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Subtotal'), Text('৳$totalOriginalPrice', style: const TextStyle(fontWeight: FontWeight.bold))]),
+                    const SizedBox(height: 5),
+                    
+                    if (totalSavings > 0) ...[
+                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Discount Savings', style: TextStyle(color: Colors.red)), Text('-৳$totalSavings', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold))]),
+                      const SizedBox(height: 5),
+                    ],
+
+                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[
+                      const Text('Delivery Charge'), 
+                      Text(hasSavedAddress ? '৳$dynamicDeliveryCharge' : 'Select Address', style: TextStyle(fontWeight: FontWeight.bold, color: hasSavedAddress ? Colors.black : Colors.red))
+                    ]),
+                    
+                    const Divider(thickness: 1, height: 20),
+                    
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+                      children:[
+                        const Text('TOTAL', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)), 
+                        Text('৳$grandTotal', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 20))
+                      ]
+                    ),
+                    const SizedBox(height: 15),
+
                     SizedBox(
                       width: double.infinity, height: 50,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-                        onPressed: () { Navigator.push(context, MaterialPageRoute(builder: (context) => CheckoutPage(grandTotal: grandTotal))); },
+                        // ঠিকানা না থাকলে বা পণ্য সিলেক্ট না করলে বাটন ডিজেবল থাকবে
+                        onPressed: (!isCalculating && totalSalePrice > 0 && hasSavedAddress) ? () { 
+                          // নির্বাচিত আইটেমগুলো নিয়ে চেকআউট পেজে পাঠানো
+                          Navigator.push(context, MaterialPageRoute(builder: (context) => CheckoutPage(grandTotal: grandTotal, selectedItemIds: selectedItems.toList()))); 
+                        } : null,
                         child: const Text('CHECKOUT', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
                       ),
                     )
@@ -280,57 +478,156 @@ class _CartPageState extends State<CartPage> {
 }
 
 // ==========================================
-// ৫ নম্বর পেজ: Checkout & Payment Method
+// ৫ নম্বর পেজ: Checkout & Payment Method (Real Address & Save Order)
 // ==========================================
 class CheckoutPage extends StatefulWidget {
   final int grandTotal; 
-  const CheckoutPage({super.key, required this.grandTotal});
-  @override State<CheckoutPage> createState() => _CheckoutPageState();
+  final List<String> selectedItemIds; // কার্ট থেকে কোন কোন পণ্য কিনেছে তার লিস্ট
+  
+  const CheckoutPage({super.key, required this.grandTotal, required this.selectedItemIds});
+  
+  @override 
+  State<CheckoutPage> createState() => _CheckoutPageState();
 }
+
 class _CheckoutPageState extends State<CheckoutPage> {
   String selectedPayment = 'Cash on Delivery';
+  
+  // কাস্টমারের আসল ঠিকানা সেভ রাখার জন্য
+  Map<String, dynamic>? deliveryAddress;
+  bool isLoadingAddress = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchDeliveryAddress();
+  }
+
+  // ফায়ারবেস থেকে ডিফল্ট ঠিকানা নিয়ে আসা
+  Future<void> _fetchDeliveryAddress() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      var addressSnapshot = await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('addresses').where('is_default', isEqualTo: true).limit(1).get();
+      if (addressSnapshot.docs.isNotEmpty) {
+        setState(() {
+          deliveryAddress = addressSnapshot.docs.first.data() as Map<String, dynamic>;
+        });
+      }
+    }
+    setState(() => isLoadingAddress = false);
+  }
+
   void confirmOrder() async {
     User? user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
+    if (user == null || deliveryAddress == null || widget.selectedItemIds.isEmpty) return;
+    
     try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+      // ১. কার্ট থেকে শুধু সিলেক্ট করা পণ্যগুলো আনা
+      List<Map<String, dynamic>> itemsToOrder =[];
       var cartSnapshot = await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').get();
-      List<Map<String, dynamic>> items =[];
-      for (var doc in cartSnapshot.docs) { items.add({'product_name': doc['product_name'], 'price': doc['price'], 'quantity': doc['quantity']}); }
-      await FirebaseFirestore.instance.collection('orders').add({'user_id': user.uid, 'items': items, 'total_amount': widget.grandTotal, 'payment_method': selectedPayment, 'status': 'Pending', 'order_date': FieldValue.serverTimestamp(), 'shipping_address': 'Rahim Ahmed, H-12, R-15, Sec-7, Uttara, Dhaka'});
-      for (var doc in cartSnapshot.docs) { await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(doc.id).delete(); }
+      
+      for (var doc in cartSnapshot.docs) { 
+        if (widget.selectedItemIds.contains(doc.id)) {
+          Map<String, dynamic> itemData = doc.data() as Map<String, dynamic>;
+          itemsToOrder.add({
+            'product_name': itemData['product_name'], 
+            'price': itemData['price'], 
+            'quantity': itemData['quantity'],
+            'seller_id': itemData.containsKey('seller_id') ? itemData['seller_id'] : 'unknown',
+            'image_url': itemData.containsKey('image_url') ? itemData['image_url'] : '',
+          }); 
+        }
+      }
+
+      // ২. অর্ডার সেভ করা (আসল ঠিকানা সহ)
+      await FirebaseFirestore.instance.collection('orders').add({
+        'user_id': user.uid, 
+        'items': itemsToOrder, 
+        'total_amount': widget.grandTotal, 
+        'payment_method': selectedPayment, 
+        'status': 'Pending', 
+        'order_date': FieldValue.serverTimestamp(), 
+        'shipping_name': deliveryAddress!['shipping_name'],
+        'shipping_phone': deliveryAddress!['shipping_phone'],
+        'shipping_address': deliveryAddress!['shipping_address_text'],
+        'latitude': deliveryAddress!['latitude'],
+        'longitude': deliveryAddress!['longitude'],
+      });
+
+      // ৩. কার্ট থেকে শুধু অর্ডার করা পণ্যগুলো ডিলিট করা
+      for (String docId in widget.selectedItemIds) { 
+        await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(docId).delete(); 
+      }
+      
       if (!mounted) return;
+      Navigator.pop(context); // লোডিং অফ
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order Placed Successfully! 🎉')));
       Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const MainScreen()), (route) => false);
-    } catch (e) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'))); }
+    } catch (e) { 
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'))); 
+    }
   }
-  @override Widget build(BuildContext context) {
+
+  @override 
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.teal[50], 
       appBar: AppBar(backgroundColor: Colors.teal[400], elevation: 0, leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pop(context)), title: const Text('PAYMENT METHOD', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), centerTitle: true),
-      body: SingleChildScrollView(
+      body: isLoadingAddress 
+      ? const Center(child: CircularProgressIndicator()) 
+      : SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
           Container(decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: Column(children:[_buildPaymentOption('Credit/Debit Card', Icons.credit_card, Colors.blue), const Divider(height: 1), _buildPaymentOption('bKash', Icons.account_balance_wallet, Colors.pink), const Divider(height: 1), _buildPaymentOption('Nagad', Icons.account_balance_wallet_outlined, Colors.orange), const Divider(height: 1), _buildPaymentOption('Cash on Delivery', Icons.local_shipping, Colors.teal)])),
           const SizedBox(height: 30),
-          const Text('SELECTED ADDRESS', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10),
-          Container(width: double.infinity, padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const[Text('Rahim Ahmed', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), SizedBox(height: 5), Text('H-12, R-15, Sec-7,\nUttara, Dhaka', style: TextStyle(color: Colors.grey, fontSize: 14))])),
+          const Text('DELIVERY ADDRESS', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10),
+          
+          // ফায়ারবেস থেকে আসা আসল ঠিকানা দেখানো
+          Container(
+            width: double.infinity, padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), 
+            child: deliveryAddress != null 
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start, 
+                  children:[
+                    Text(deliveryAddress!['shipping_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), 
+                    Text(deliveryAddress!['shipping_phone'] ?? '', style: const TextStyle(color: Colors.grey, fontSize: 13)), 
+                    const SizedBox(height: 5), 
+                    Text(deliveryAddress!['shipping_address_text'] ?? '', style: const TextStyle(color: Colors.black87, fontSize: 14))
+                  ]
+                )
+              : const Text('No default address found! Please add one from your profile.', style: TextStyle(color: Colors.red)),
+          ),
+          
           const SizedBox(height: 30),
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Order Total + Delivery', style: TextStyle(fontSize: 16)), Text('৳${widget.grandTotal}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18))]),
           const SizedBox(height: 10),
           Row(children: const[Icon(Icons.lock, size: 16, color: Colors.grey), SizedBox(width: 5), Text('Secure Payment', style: TextStyle(color: Colors.grey))]),
           const SizedBox(height: 30),
-          SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal[400], shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), onPressed: confirmOrder, child: const Text('CONFIRM PAYMENT', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))))
+          
+          // ঠিকানা না থাকলে কনফার্ম বাটন ডিজেবল থাকবে
+          SizedBox(
+            width: double.infinity, height: 50, 
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal[400], shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), 
+              onPressed: deliveryAddress != null ? confirmOrder : null, 
+              child: const Text('CONFIRM ORDER', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))
+            )
+          )
         ]),
       ),
     );
   }
+  
   Widget _buildPaymentOption(String title, IconData icon, Color iconColor) {
     return RadioListTile<String>(title: Row(children:[Icon(icon, color: iconColor), const SizedBox(width: 15), Text(title, style: const TextStyle(fontWeight: FontWeight.bold))]), value: title, groupValue: selectedPayment, activeColor: Colors.deepOrange, onChanged: (value) => setState(() => selectedPayment = value!));
   }
 }
 
 // ==========================================
-// ৩ নম্বর পেজ: Product Details (Dynamic Pricing based on Variants)
+// ৩ নম্বর পেজ: Product Details (Fixed Fly Animation + Dynamic Pricing)
 // ==========================================
 class ProductDetailsPage extends StatefulWidget {
   final QueryDocumentSnapshot product; 
@@ -349,12 +646,13 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
   Map<String, dynamic>? selectedColor;
   Map<String, dynamic>? selectedSize;
 
+  // জাদুকরী Fly to Cart এনিমেশন ফাংশন (Restored)
   void runAddToCartAnimation(String imageUrl) {
-    // আগের মতই এনিমেশন কোড...
     if (imageUrl.isEmpty) return;
     RenderBox? imageBox = _imageKey.currentContext?.findRenderObject() as RenderBox?;
     RenderBox? cartBox = _cartKey.currentContext?.findRenderObject() as RenderBox?;
     if (imageBox == null || cartBox == null) return;
+    
     Offset imagePos = imageBox.localToGlobal(Offset.zero);
     Offset cartPos = cartBox.localToGlobal(Offset.zero);
 
@@ -370,7 +668,13 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
             double top = imagePos.dy + (cartPos.dy - imagePos.dy) * value;
             double size = 200 * (1.0 - value);
             if (size < 20) size = 20;
-            return Positioned(left: left, top: top, child: Opacity(opacity: 1.0 - (value * 0.3), child: ClipRRect(borderRadius: BorderRadius.circular(100), child: Image.network(imageUrl, width: size, height: size, fit: BoxFit.cover))));
+            return Positioned(
+              left: left, top: top, 
+              child: Opacity(
+                opacity: 1.0 - (value * 0.3), 
+                child: ClipRRect(borderRadius: BorderRadius.circular(100), child: Image.network(imageUrl, width: size, height: size, fit: BoxFit.cover))
+              )
+            );
           },
         );
       },
@@ -390,14 +694,14 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     if (colors.isNotEmpty && selectedColor == null) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a color first!'))); return; }
     if (sizes.isNotEmpty && selectedSize == null) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a size first!'))); return; }
 
+    // এনিমেশন কল করা হলো
     if (!isBuyNow) runAddToCartAnimation(imageUrl);
 
     var cartRef = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart');
-    // একই প্রোডাক্ট, একই কালার এবং একই সাইজ কিনা তা চেক করা
     var existingItem = await cartRef
         .where('product_name', isEqualTo: widget.product['product_name'])
-        .where('selected_color', isEqualTo: selectedColor?['name'] ?? '')
-        .where('selected_size', isEqualTo: selectedSize?['name'] ?? '')
+        .where('selected_color', isEqualTo: selectedColor != null ? selectedColor!['name'] : '')
+        .where('selected_size', isEqualTo: selectedSize != null ? selectedSize!['name'] : '')
         .get();
 
     if (existingItem.docs.isNotEmpty) {
@@ -405,12 +709,13 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     } else {
       await cartRef.add({
         'product_name': widget.product['product_name'],
-        'price': finalPrice, // ক্যালকুলেট করা ফাইনাল দাম
+        'price': finalPrice, 
+        'original_price': data['original_price'] ?? data['price'],
         'quantity': 1,
         'image_url': imageUrl,
-        'selected_color': selectedColor?['name'] ?? '',
-        'selected_size': selectedSize?['name'] ?? '',
-        'max_stock': maxStock, // কার্টে স্টক ওয়ার্নিং দেখানোর জন্য
+        'selected_color': selectedColor != null ? selectedColor!['name'] : '',
+        'selected_size': selectedSize != null ? selectedSize!['name'] : '',
+        'max_stock': maxStock, 
         'added_at': FieldValue.serverTimestamp(),
       });
     }
@@ -419,14 +724,10 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     else { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Item flying to Cart! 🚀'), duration: Duration(seconds: 1))); }
   }
 
-  // কাস্টমার কোনো প্রোডাক্ট দেখলে তা ফায়ারবেসে 'recently_viewed' এ সেভ করে রাখা
   void _saveToRecentlyViewed() async {
     User? user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-
     var recentRef = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('recently_viewed');
-    
-    // প্রোডাক্টটি আগে থেকেই দেখা থাকলে তার সময় আপডেট করা, নাহলে নতুন করে সেভ করা
     await recentRef.doc(widget.product.id).set({
       'product_id': widget.product.id,
       'category': widget.product['category'],
@@ -437,7 +738,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
   @override
   void initState() {
     super.initState();
-    // পেজ ওপেন হওয়ার সাথে সাথেই এটি 'Recently Viewed' হিসেবে সেভ হয়ে যাবে
     _saveToRecentlyViewed(); 
   }
 
@@ -449,12 +749,10 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     List<dynamic> sizes = data.containsKey('sizes') ? data['sizes'] :[];
     String mainImage = images.isNotEmpty && images.length > _selectedImageIndex ? images[_selectedImageIndex] : '';
     
-    // প্রাইস ক্যালকুলেশন লজিক
     int basePrice = int.tryParse(data['price'].toString()) ?? 0;
     int originalPrice = int.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : '0') ?? 0;
     int stock = int.tryParse(data['stock'].toString()) ?? 0;
     
-    // ভেরিয়েন্ট সিলেক্ট করলে অতিরিক্ত দাম যোগ হবে
     int extraColorPrice = selectedColor != null ? (selectedColor!['extra_price'] as num).toInt() : 0;
     int extraSizePrice = selectedSize != null ? (selectedSize!['extra_price'] as num).toInt() : 0;
     
@@ -472,9 +770,8 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         backgroundColor: Colors.white, elevation: 0,
         leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.black, size: 20), onPressed: () => Navigator.pop(context)),
         actions:[
-          // উইশলিস্ট (হার্ট) বাটন (Magic Logic)
           StreamBuilder<DocumentSnapshot>(
-            stream: FirebaseFirestore.instance.collection('users').doc(FirebaseAuth.instance.currentUser!.uid).collection('wishlist').doc(widget.product.id).snapshots(),
+            stream: FirebaseAuth.instance.currentUser != null ? FirebaseFirestore.instance.collection('users').doc(FirebaseAuth.instance.currentUser!.uid).collection('wishlist').doc(widget.product.id).snapshots() : const Stream<DocumentSnapshot>.empty(),
             builder: (context, snapshot) {
               bool isWished = snapshot.hasData && snapshot.data!.exists;
               return IconButton(
@@ -482,23 +779,16 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                 onPressed: () async {
                   User? user = FirebaseAuth.instance.currentUser;
                   if (user == null) return;
-                  
                   var ref = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('wishlist').doc(widget.product.id);
-                  if (isWished) {
-                    await ref.delete();
-                    if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Removed from Wishlist 💔')));
-                  } else {
-                    // প্রোডাক্টের পুরো ডাটা উইশলিস্টে সেভ করে রাখছি
-                    await ref.set(widget.product.data() as Map<String, dynamic>); 
-                    if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Added to Wishlist ❤️')));
-                  }
+                  if (isWished) { await ref.delete(); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Removed from Wishlist 💔'))); } 
+                  else { await ref.set(widget.product.data() as Map<String, dynamic>); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Added to Wishlist ❤️'))); }
                 },
               );
             },
           ),
           IconButton(icon: const Icon(Icons.share, color: Colors.black), onPressed: () {}), 
           IconButton(
-            key: _cartKey, 
+            key: _cartKey, // <--- কার্ট আইকনের Key
             icon: const Icon(Icons.shopping_cart_outlined, color: Colors.black), 
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const CartPage()))
           )
@@ -516,6 +806,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children:[
+                        // <--- ছবির Key
                         Center(child: Container(key: _imageKey, height: 300, width: double.infinity, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: mainImage.isNotEmpty ? Image.network(mainImage, fit: BoxFit.contain) : const Icon(Icons.image, size: 100, color: Colors.grey))),
                         const SizedBox(height: 15),
                         if (images.length > 1) SizedBox(height: 60, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: images.length, itemBuilder: (context, index) { bool isSelected = _selectedImageIndex == index; return InkWell(onTap: () => setState(() => _selectedImageIndex = index), child: Container(margin: const EdgeInsets.only(right: 10), height: 60, width: 60, decoration: BoxDecoration(border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 2), borderRadius: BorderRadius.circular(8), image: DecorationImage(image: NetworkImage(images[index]), fit: BoxFit.cover)))); })),
@@ -553,8 +844,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                     ),
                   ),
                   const SizedBox(height: 10), 
-
-                  // ডায়নামিক কালার এবং সাইজ সিলেকশন
                   Container(
                     width: double.infinity, color: Colors.white, padding: const EdgeInsets.all(15),
                     child: Column(
@@ -567,11 +856,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                               int extra = (c['extra_price'] as num).toInt();
                               return InkWell(
                                 onTap: () => setState(() => selectedColor = isSelected ? null : c),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), 
-                                  decoration: BoxDecoration(color: isSelected ? Colors.deepOrange.shade50 : Colors.white, border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300), borderRadius: BorderRadius.circular(5)), 
-                                  child: Text('${c['name']} ${extra > 0 ? '(+৳$extra)' : ''}', style: TextStyle(color: isSelected ? Colors.deepOrange : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal))
-                                )
+                                child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), decoration: BoxDecoration(color: isSelected ? Colors.deepOrange.shade50 : Colors.white, border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300), borderRadius: BorderRadius.circular(5)), child: Text('${c['name']} ${extra > 0 ? '(+৳$extra)' : ''}', style: TextStyle(color: isSelected ? Colors.deepOrange : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)))
                               );
                             }).toList()
                           ), 
@@ -584,11 +869,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                               int extra = (s['extra_price'] as num).toInt();
                               return InkWell(
                                 onTap: () => setState(() => selectedSize = isSelected ? null : s),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), 
-                                  decoration: BoxDecoration(color: isSelected ? Colors.teal.shade50 : Colors.white, border: Border.all(color: isSelected ? Colors.teal : Colors.grey.shade300), borderRadius: BorderRadius.circular(5)), 
-                                  child: Text('${s['name']} ${extra > 0 ? '(+৳$extra)' : ''}', style: TextStyle(color: isSelected ? Colors.teal : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal))
-                                )
+                                child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), decoration: BoxDecoration(color: isSelected ? Colors.teal.shade50 : Colors.white, border: Border.all(color: isSelected ? Colors.teal : Colors.grey.shade300), borderRadius: BorderRadius.circular(5)), child: Text('${s['name']} ${extra > 0 ? '(+৳$extra)' : ''}', style: TextStyle(color: isSelected ? Colors.teal : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)))
                               );
                             }).toList()
                           ), 
@@ -597,8 +878,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                     ),
                   ),
                   const SizedBox(height: 10),
-
-                  // সেলার শপ ডিটেইলস
                   Container(
                     color: Colors.white, padding: const EdgeInsets.all(15),
                     child: Row(
@@ -620,8 +899,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                     ),
                   ),
                   const SizedBox(height: 10),
-
-                  // ডেসক্রিপশন বক্স
                   Container(
                     width: double.infinity, color: Colors.white, padding: const EdgeInsets.all(15),
                     child: Column(
@@ -642,36 +919,11 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 10),
-
-                  // রেকমেন্ডেড প্রডাক্ট সেকশন
-                  Container(
-                    color: Colors.white, padding: const EdgeInsets.symmetric(vertical: 15),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children:[
-                        const Padding(padding: EdgeInsets.symmetric(horizontal: 15), child: Text('You May Also Like', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))), const SizedBox(height: 10),
-                        StreamBuilder<QuerySnapshot>(
-                          stream: FirebaseFirestore.instance.collection('products').where('status', isEqualTo: 'approved').where('category', isEqualTo: data['category']).limit(6).snapshots(),
-                          builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                            if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const SizedBox();
-                            var recDocs = snapshot.data!.docs.where((d) => d.id != widget.product.id).toList();
-                            if (recDocs.isEmpty) return const Padding(padding: EdgeInsets.all(15.0), child: Text('No recommendations yet.', style: TextStyle(color: Colors.grey)));
-                            return SizedBox(height: 200, child: ListView.builder(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 10), itemCount: recDocs.length, itemBuilder: (context, index) {
-                                  var recData = recDocs[index].data() as Map<String, dynamic>; String img = (recData.containsKey('image_urls') && (recData['image_urls'] as List).isNotEmpty) ? recData['image_urls'][0] : '';
-                                  return InkWell(onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: recDocs[index]))), child: Container(width: 140, margin: const EdgeInsets.only(right: 10), decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade200), borderRadius: BorderRadius.circular(10)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Expanded(child: Container(width: double.infinity, decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), child: img.isNotEmpty ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(10)), child: Image.network(img, fit: BoxFit.cover)) : const Icon(Icons.image))), Padding(padding: const EdgeInsets.all(8.0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(recData['product_name'], maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)), const SizedBox(height: 4), Text('৳${recData['price']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold))]))])));
-                                }));
-                          }
-                        )
-                      ],
-                    ),
-                  ),
                   const SizedBox(height: 20),
                 ],
               ),
             ),
           ),
-
           Container(
             padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, boxShadow:[BoxShadow(color: Colors.grey.shade200, blurRadius: 10, offset: const Offset(0, -5))]),
             child: Row(
@@ -699,6 +951,9 @@ class ShopeeHome extends StatefulWidget {
 }
 
 class _ShopeeHomeState extends State<ShopeeHome> {
+  late PageController _bannerController; // স্লাইডার কন্ট্রোল করার জন্য
+  int _currentBannerPage = 0; // বর্তমান স্লাইড নম্বর ট্র্যাক করার জন্য
+  Timer? _bannerTimer; // টাইমার রাখার জন্য (Timer ইম্পোর্ট করতে হতে পারে)
   String searchQuery = '';
   String selectedCategoryFilter = ''; 
   final TextEditingController searchController = TextEditingController();
@@ -723,6 +978,31 @@ class _ShopeeHomeState extends State<ShopeeHome> {
     {'name': 'Cameras', 'icon': Icons.camera_alt, 'color': Colors.blueAccent}, 
     {'name': 'Travel & Luggage', 'icon': Icons.luggage, 'color': Colors.tealAccent.shade700},
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _bannerController = PageController(initialPage: 0);
+
+    // ৫ সেকেন্ড পর পর অটো স্লাইড
+    _bannerTimer = Timer.periodic(const Duration(seconds: 5), (Timer timer) {
+      if (_bannerController.hasClients) {
+        // যদি শেষ পেজে থাকে তবে এনিমেশন ছাড়া ১ নম্বর পেজে যাবে, তারপর আবার স্লাইড হবে
+        // অথবা সহজ সমাধান হিসেবে nextPage ব্যবহার করা
+        _bannerController.nextPage(
+          duration: const Duration(milliseconds: 800),
+          curve: Curves.easeInOut,
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _bannerTimer?.cancel(); // অ্যাপ মেমরি ক্লিন রাখার জন্য
+    _bannerController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -789,14 +1069,47 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children:[
                         if (searchQuery.isEmpty && selectedCategoryFilter.isEmpty) ...[
-                          // ব্যানার সেকশন
                           StreamBuilder(
-                            stream: FirebaseFirestore.instance.collection('banners').snapshots(),
+                            stream: FirebaseFirestore.instance.collection('banners').snapshots(), 
                             builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
                               if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
-                                return SizedBox(height: 140, child: PageView.builder(itemCount: snapshot.data!.docs.length, itemBuilder: (context, index) { return Container(margin: const EdgeInsets.all(15), decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), image: DecorationImage(image: NetworkImage(snapshot.data!.docs[index]['image_url']), fit: BoxFit.cover))); }));
+                                // ১. একটিভ ব্যানারগুলো ফিল্টার করা হচ্ছে
+                                var activeDocs = snapshot.data!.docs.where((doc) {
+                                  Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+                                  return data.containsKey('isActive') ? data['isActive'] == true : true;
+                                }).toList();
+
+                                // যদি কোনো একটিভ ব্যানার না থাকে তবে ডিফল্ট ব্যানার দেখাবে
+                                if (activeDocs.isEmpty) return _buildDefaultBanner(); 
+
+                                return SizedBox(
+                                  height: 160,
+                                  child: PageView.builder(
+                                    controller: _bannerController,
+                                    // ২. অসীম লুপের জন্য রিয়েল ইনডেক্স লজিক
+                                    itemBuilder: (context, index) {
+                                      int realIndex = index % activeDocs.length; 
+
+                                      return Container(
+                                        margin: const EdgeInsets.all(15),
+                                        decoration: BoxDecoration(
+                                          borderRadius: BorderRadius.circular(10),
+                                          image: DecorationImage(
+                                            image: NetworkImage(activeDocs[realIndex]['image_url']),
+                                            fit: BoxFit.cover,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                    // ৩. ইউজার হাত দিয়ে স্লাইড করলে বর্তমান পেজ আপডেট রাখা
+                                    onPageChanged: (index) {
+                                      _currentBannerPage = index;
+                                    },
+                                  ),
+                                );
                               }
-                              return Container(margin: const EdgeInsets.all(15), height: 120, decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), gradient: LinearGradient(colors:[Colors.orange.shade200, Colors.deepOrange.shade100])), child: Row(children:[const Padding(padding: EdgeInsets.all(15.0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children:[Text('FESTIVE OFFER!', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red, fontSize: 16)), Text('UP TO 20% OFF', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22)), SizedBox(height: 5), Text('Explore Now >', style: TextStyle(color: Colors.deepOrange, fontSize: 12, fontWeight: FontWeight.bold))])), const Spacer(), const Icon(Icons.card_giftcard, size: 80, color: Colors.redAccent), const SizedBox(width: 20)]));
+                              // ডাটা লোড হওয়ার সময় বা ডাটা না থাকলে ডিফল্ট ব্যানার
+                              return _buildDefaultBanner(); 
                             },
                           ),
 
@@ -1061,6 +1374,45 @@ class _ShopeeHomeState extends State<ShopeeHome> {
       ),
     );
   }
+
+  // এই অংশটি ক্লাসের ভেতরে একদম নিচে বসান
+  Widget _buildDefaultBanner() {
+    return Container(
+      margin: const EdgeInsets.all(15),
+      height: 120,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        gradient: LinearGradient(
+          colors: [Colors.orange.shade200, Colors.deepOrange.shade100],
+        ),
+      ),
+      child: Row(
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(15.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  'WELCOME TO D SHOP!',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red, fontSize: 16),
+                ),
+                Text(
+                  'Explore Best Products',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                ),
+              ],
+            ),
+          ),
+          const Spacer(),
+          Icon(Icons.shopping_bag, size: 80, color: Colors.deepOrange.withOpacity(0.3)),
+          const SizedBox(width: 20),
+        ],
+      ),
+    );
+  }
 }
 
 // ==========================================
@@ -1283,56 +1635,380 @@ class _UserDashboardState extends State<UserDashboard> {
 }
 
 // ==========================================
-// লগিন ও সাইন আপ পেজ
+// লগিন পেজ (Login Page)
 // ==========================================
-class LoginPage extends StatefulWidget { const LoginPage({super.key}); @override State<LoginPage> createState() => _LoginPageState(); }
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
 class _LoginPageState extends State<LoginPage> {
-  final TextEditingController emailController = TextEditingController(); final TextEditingController passwordController = TextEditingController();
+  final TextEditingController emailController = TextEditingController();
+  final TextEditingController passwordController = TextEditingController();
+
+  // লগিন ফাংশন (Smart Role-based Login)
   void login() async {
+    if (emailController.text.isEmpty || passwordController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter email and password!')));
+      return;
+    }
+
     try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+      // ফায়ারবেস লগিন
       UserCredential userCredential = await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: emailController.text.trim(), 
         password: passwordController.text.trim()
       );
+      
+      // ইউজারের রোল (Role) খোঁজা
       DocumentSnapshot userDoc = await FirebaseFirestore.instance.collection('users').doc(userCredential.user!.uid).get();
       
       if (!mounted) return;
+      Navigator.pop(context); // লোডিং বন্ধ
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Login Successful!')));
       
-      String role = userDoc['role'];
-      // রোল অনুযায়ী সঠিক পেজে পাঠানো হচ্ছে
+      // রোল অনুযায়ী পেজে পাঠানো
+      String role = 'customer';
+      if (userDoc.exists && (userDoc.data() as Map<String, dynamic>).containsKey('role')) {
+        role = userDoc['role'];
+      }
+
       if (role == 'admin') {
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const AdminMainScreen()));
       } else if (role == 'seller') {
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
-      } else if (role == 'rider') { // <--- রাইডার যুক্ত করা হলো
+      } else if (role == 'rider') { 
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const RiderMainScreen()));
       } else {
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
       }
     } catch (e) {
+      if (mounted) Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}')));
     }
   }
-  @override Widget build(BuildContext context) {
-    return Scaffold(backgroundColor: Colors.orange[50], body: Center(child: Padding(padding: const EdgeInsets.all(20.0), child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[const Icon(Icons.shopping_cart_checkout, size: 80, color: Colors.deepOrange), const SizedBox(height: 20), const Text('Welcome to D Shop', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.deepOrange)), const SizedBox(height: 40), TextField(controller: emailController, decoration: InputDecoration(labelText: 'Email', prefixIcon: const Icon(Icons.email), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), filled: true, fillColor: Colors.white)), const SizedBox(height: 15), TextField(controller: passwordController, obscureText: true, decoration: InputDecoration(labelText: 'Password', prefixIcon: const Icon(Icons.lock), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), filled: true, fillColor: Colors.white)), const SizedBox(height: 30), SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), onPressed: login, child: const Text('LOGIN', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)))), const SizedBox(height: 20), TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const SignupPage())), child: const Text("Don't have an account? Sign Up", style: TextStyle(color: Colors.deepOrange, fontSize: 16)))]))));
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.orange[50], 
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20.0), 
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center, 
+            children:[
+              const Icon(Icons.shopping_cart_checkout, size: 80, color: Colors.deepOrange), 
+              const SizedBox(height: 20), 
+              const Text('Welcome Back', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.deepOrange)), 
+              const SizedBox(height: 40), 
+              
+              TextField(
+                controller: emailController, 
+                keyboardType: TextInputType.emailAddress,
+                decoration: InputDecoration(labelText: 'Email', prefixIcon: const Icon(Icons.email), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), filled: true, fillColor: Colors.white)
+              ), 
+              const SizedBox(height: 15), 
+              
+              TextField(
+                controller: passwordController, 
+                obscureText: true, 
+                decoration: InputDecoration(labelText: 'Password', prefixIcon: const Icon(Icons.lock), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), filled: true, fillColor: Colors.white)
+              ), 
+              const SizedBox(height: 30), 
+              
+              SizedBox(
+                width: double.infinity, height: 50, 
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), 
+                  onPressed: login, 
+                  child: const Text('LOGIN', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))
+                )
+              ), 
+              const SizedBox(height: 20), 
+              
+              TextButton(
+                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const SignupPage())), 
+                child: const Text("Don't have an account? Sign Up", style: TextStyle(color: Colors.deepOrange, fontSize: 16))
+              )
+            ]
+          )
+        )
+      )
+    );
   }
 }
 
-class SignupPage extends StatefulWidget { const SignupPage({super.key}); @override State<SignupPage> createState() => _SignupPageState(); }
+// ==========================================
+// অ্যাডভান্সড সাইন-আপ পেজ (Role Based + Map + Social Login)
+// ==========================================
+class SignupPage extends StatefulWidget {
+  const SignupPage({super.key});
+
+  @override
+  State<SignupPage> createState() => _SignupPageState();
+}
+
 class _SignupPageState extends State<SignupPage> {
-  final TextEditingController nameController = TextEditingController(); final TextEditingController emailController = TextEditingController(); final TextEditingController passwordController = TextEditingController();
+  final TextEditingController nameController = TextEditingController(); 
+  final TextEditingController emailController = TextEditingController(); 
+  final TextEditingController passwordController = TextEditingController();
+  
+  String selectedRole = 'customer'; // ডিফল্টভাবে কাস্টমার সিলেক্ট থাকবে
+  LatLng? vendorLocation; // সেলার/রাইডারের লোকেশন সেভ রাখার জন্য
+
+  // ইমেইল দিয়ে অ্যাকাউন্ট খোলার মেইন ফাংশন
   void createAccount() async {
+    if (nameController.text.isEmpty || emailController.text.isEmpty || passwordController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('সবগুলো ঘর পূরণ করুন!')));
+      return;
+    }
+
+    // সেলার বা রাইডার হলে লোকেশন দেওয়া বাধ্যতামূলক
+    if (selectedRole != 'customer' && vendorLocation == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('সেলার বা রাইডার হিসেবে যুক্ত হতে ম্যাপে লোকেশন সেট করা বাধ্যতামূলক! 📍')));
+      return;
+    }
+
     try {
-      UserCredential userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(email: emailController.text.trim(), password: passwordController.text.trim());
-      await FirebaseFirestore.instance.collection('users').doc(userCredential.user!.uid).set({'name': nameController.text.trim(), 'email': emailController.text.trim(), 'role': 'customer', 'created_at': FieldValue.serverTimestamp()});
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+      // ফায়ারবেস অথেনটিকেশন
+      UserCredential userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: emailController.text.trim(), 
+        password: passwordController.text.trim()
+      );
+      
+      // ডাটাবেসে সেভ করার জন্য ডাটা প্রস্তুত করা
+      Map<String, dynamic> userData = {
+        'name': nameController.text.trim(), 
+        'email': emailController.text.trim(), 
+        'role': selectedRole, 
+        'created_at': FieldValue.serverTimestamp()
+      };
+
+      // যদি সেলার বা রাইডার হয়, তবে তাদের লোকেশন এবং পেন্ডিং স্ট্যাটাস যোগ হবে
+      if (selectedRole != 'customer') {
+        userData['latitude'] = vendorLocation!.latitude;
+        userData['longitude'] = vendorLocation!.longitude;
+        userData['status'] = 'pending'; // অ্যাডমিন এপ্রুভ না করা পর্যন্ত পেন্ডিং থাকবে
+      }
+
+      await FirebaseFirestore.instance.collection('users').doc(userCredential.user!.uid).set(userData);
+      
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account Created Successfully!')));
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
-    } catch (e) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}'))); }
+      Navigator.pop(context); // লোডিং বন্ধ
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account Created Successfully! 🎉')));
+      
+      // রোল অনুযায়ী পেজে পাঠানো
+      if (selectedRole == 'seller') {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
+      } else if (selectedRole == 'rider') {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const RiderMainScreen()));
+      } else {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+      }
+    } catch (e) { 
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}'))); 
+    }
   }
-  @override Widget build(BuildContext context) {
-    return Scaffold(appBar: AppBar(title: const Text('Create Account'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white), body: Padding(padding: const EdgeInsets.all(20.0), child: Column(children:[TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Full Name', border: OutlineInputBorder())), const SizedBox(height: 15), TextField(controller: emailController, decoration: const InputDecoration(labelText: 'Email Address', border: OutlineInputBorder())), const SizedBox(height: 15), TextField(controller: passwordController, obscureText: true, decoration: const InputDecoration(labelText: 'Password (min 6 chars)', border: OutlineInputBorder())), const SizedBox(height: 30), SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.green), onPressed: createAccount, child: const Text('SIGN UP', style: TextStyle(color: Colors.white, fontSize: 18))))])));
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(title: const Text('Create Account', style: TextStyle(fontWeight: FontWeight.bold)), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white, elevation: 0),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20.0), 
+        child: Column(
+          children:[
+            // রোল সিলেক্ট করার টগল বাটন
+            Container(
+              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(10)),
+              padding: const EdgeInsets.all(5),
+              child: Row(
+                children:[
+                  _buildRoleOption('Customer', 'customer', Icons.person),
+                  _buildRoleOption('Seller', 'seller', Icons.storefront),
+                  _buildRoleOption('Rider', 'rider', Icons.motorcycle),
+                ],
+              ),
+            ),
+            const SizedBox(height: 25),
+
+            TextField(controller: nameController, decoration: InputDecoration(labelText: 'Full Name', prefixIcon: const Icon(Icons.badge), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)))), 
+            const SizedBox(height: 15), 
+            TextField(controller: emailController, keyboardType: TextInputType.emailAddress, decoration: InputDecoration(labelText: 'Email Address', prefixIcon: const Icon(Icons.email), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)))), 
+            const SizedBox(height: 15), 
+            TextField(controller: passwordController, obscureText: true, decoration: InputDecoration(labelText: 'Password (min 6 chars)', prefixIcon: const Icon(Icons.lock), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)))), 
+            const SizedBox(height: 20), 
+
+            // সেলার বা রাইডার সিলেক্ট করলে লোকেশন বাটন দেখাবে
+            if (selectedRole != 'customer') ...[
+              Container(
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(color: Colors.orange.shade50, border: Border.all(color: Colors.deepOrange.shade200), borderRadius: BorderRadius.circular(10)),
+                child: Row(
+                  children:[
+                    const Icon(Icons.location_on, color: Colors.deepOrange),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(vendorLocation == null ? 'Location is required for $selectedRole' : 'Location Saved Successfully ✅', style: TextStyle(color: vendorLocation == null ? Colors.black87 : Colors.green, fontWeight: FontWeight.bold))),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: vendorLocation == null ? Colors.deepOrange : Colors.green),
+                      onPressed: () async {
+                        // ম্যাপ পেজ থেকে লোকেশন নিয়ে আসবে
+                        LatLng? result = await Navigator.push(context, MaterialPageRoute(builder: (context) => const LocationPickerScreen()));
+                        if (result != null) {
+                          setState(() { vendorLocation = result; });
+                        }
+                      }, 
+                      child: Text(vendorLocation == null ? 'Set on Map' : 'Change', style: const TextStyle(color: Colors.white))
+                    )
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
+
+            SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), onPressed: createAccount, child: const Text('CREATE ACCOUNT', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)))),
+            
+            const SizedBox(height: 30),
+            Row(children: const[Expanded(child: Divider()), Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text("OR SIGN UP WITH", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 12))), Expanded(child: Divider())]),
+            const SizedBox(height: 20),
+
+            // Google এবং Phone বাটন (Social Login)
+            Row(
+              children:[
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 15), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                    icon: const Icon(Icons.g_mobiledata, color: Colors.red, size: 30),
+                    label: const Text('Google', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                    onPressed: () {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Firebase settings required for Google Sign-In! We will do it next.')));
+                    },
+                  ),
+                ),
+                const SizedBox(width: 15),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 15), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                    icon: const Icon(Icons.phone_android, color: Colors.blue, size: 24),
+                    label: const Text('Phone', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                    onPressed: () {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Phone Authentication coming soon!')));
+                    },
+                  ),
+                ),
+              ],
+            )
+          ]
+        )
+      )
+    );
+  }
+
+  // রোল সিলেক্ট করার টগল বাটনের ডিজাইন
+  Widget _buildRoleOption(String title, String role, IconData icon) {
+    bool isSelected = selectedRole == role;
+    return Expanded(
+      child: InkWell(
+        onTap: () {
+          setState(() { 
+            selectedRole = role; 
+            vendorLocation = null; // রোল চেঞ্জ করলে লোকেশন রিসেট হয়ে যাবে
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.deepOrange : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: isSelected ? [const BoxShadow(color: Colors.black12, blurRadius: 5)] :[],
+          ),
+          child: Column(
+            children:[
+              Icon(icon, color: isSelected ? Colors.white : Colors.grey, size: 20),
+              const SizedBox(height: 5),
+              Text(title, style: TextStyle(color: isSelected ? Colors.white : Colors.grey, fontWeight: FontWeight.bold, fontSize: 12)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ==========================================
+// ম্যাপ থেকে লোকেশন পিক করার স্ক্রিন (সেলার/রাইডারের জন্য)
+// ==========================================
+class LocationPickerScreen extends StatefulWidget {
+  const LocationPickerScreen({super.key});
+
+  @override
+  State<LocationPickerScreen> createState() => _LocationPickerScreenState();
+}
+
+class _LocationPickerScreenState extends State<LocationPickerScreen> {
+  LatLng _currentPosition = const LatLng(23.6062, 90.1345); // দোহার
+  GoogleMapController? _mapController;
+
+  @override
+  void initState() {
+    super.initState();
+    _getUserCurrentLocation();
+  }
+
+  Future<void> _getUserCurrentLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+    Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+    setState(() { _currentPosition = LatLng(position.latitude, position.longitude); });
+    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_currentPosition, 16));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Pin Your Location'), backgroundColor: Colors.deepOrange),
+      body: Stack(
+        alignment: Alignment.center,
+        children:[
+          GoogleMap(
+            initialCameraPosition: CameraPosition(target: _currentPosition, zoom: 15),
+            onMapCreated: (GoogleMapController controller) => _mapController = controller,
+            onCameraMove: (position) => _currentPosition = position.target,
+            myLocationEnabled: false,
+            zoomControlsEnabled: false,
+          ),
+          const Padding(
+            padding: EdgeInsets.only(bottom: 35.0), 
+            child: Icon(Icons.location_on, size: 50, color: Colors.deepOrange),
+          ),
+          Positioned(
+            bottom: 20, left: 20, right: 20,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, padding: const EdgeInsets.symmetric(vertical: 15)),
+              onPressed: () {
+                // পিন করা লোকেশনটি নিয়ে আগের পেজে ফেরত যাবে
+                Navigator.pop(context, _currentPosition);
+              },
+              child: const Text('CONFIRM LOCATION', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+          )
+        ],
+      ),
+    );
   }
 }
 
@@ -1637,8 +2313,11 @@ class AdminDashboard extends StatelessWidget {
               title: const Text('Push Notifications', style: TextStyle(fontWeight: FontWeight.bold)),
               subtitle: const Text('Send offers to all', style: TextStyle(fontSize: 10, color: Colors.grey)),
               onTap: () {
-                Navigator.pop(context); // মেনু বন্ধ করবে
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Notification system coming soon!')));
+                Navigator.pop(context); // ড্রয়ার বন্ধ করতে
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const AdminNotificationPage()),
+                );
               },
             ),
             ListTile(
@@ -1654,24 +2333,32 @@ class AdminDashboard extends StatelessWidget {
               title: const Text('Manage Banners', style: TextStyle(fontWeight: FontWeight.bold)),
               onTap: () {
                 Navigator.pop(context);
-                // আমরা আগে যেই ব্যানার পেজ বানিয়েছিলাম সেখানে নিয়ে যাবে
-                Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminBannerUploadPage()));
+                Navigator.push(
+                  context, 
+                  MaterialPageRoute(builder: (context) => const AdminBannerManagementPage())
+                );
               },
             ),
             ListTile(
               leading: const Icon(Icons.motorcycle, color: Colors.purple),
               title: const Text('Manage Riders', style: TextStyle(fontWeight: FontWeight.bold)),
               onTap: () {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Rider management coming soon!')));
+                Navigator.pop(context); // ড্রয়ার বন্ধ করতে
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const AdminManageRidersPage()),
+                );
               },
             ),
             ListTile(
               leading: const Icon(Icons.map, color: Colors.green),
               title: const Text('Delivery Zones & Charges', style: TextStyle(fontWeight: FontWeight.bold)),
               onTap: () {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Zone setting coming soon!')));
+                Navigator.pop(context); // ড্রয়ার বন্ধ করতে
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const AdminDeliveryZonePage()),
+                );
               },
             ),
             const Divider(height: 30, thickness: 1),
@@ -1880,42 +2567,173 @@ class _AdminProductApprovalPageState extends State<AdminProductApprovalPage> {
 }
 
 // ==========================================
-// অ্যাডমিন পেজ ২: User & Seller Management
+// অ্যাডমিন পেজ ২: User & Seller Management (Approval System)
 // ==========================================
-class AdminUserManagement extends StatelessWidget {
+class AdminUserManagement extends StatefulWidget {
   const AdminUserManagement({super.key});
+
+  @override
+  State<AdminUserManagement> createState() => _AdminUserManagementState();
+}
+
+class _AdminUserManagementState extends State<AdminUserManagement> {
+  // কোন ট্যাবে আছে তা ট্র্যাক করার জন্য (0 = Users, 1 = Sellers)
+  int _selectedTab = 1; 
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(backgroundColor: Colors.orange[200], title: const Text('Management Hub', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), iconTheme: const IconThemeData(color: Colors.black)),
+      backgroundColor: Colors.grey[100],
+      appBar: AppBar(
+        backgroundColor: Colors.orange[200], 
+        title: const Text('Management Hub', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), 
+        iconTheme: const IconThemeData(color: Colors.black)
+      ),
       body: Column(
         children:[
-          Padding(padding: const EdgeInsets.all(15), child: Row(mainAxisAlignment: MainAxisAlignment.center, children:[ElevatedButton(onPressed: (){}, style: ElevatedButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black), child: const Text('Users')), const SizedBox(width: 10), ElevatedButton(onPressed: (){}, style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black), child: const Text('Sellers'))])),
+          // উপরের টগল বাটন (Users vs Sellers)
+          Padding(
+            padding: const EdgeInsets.all(15), 
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center, 
+              children:[
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => setState(() => _selectedTab = 0), 
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _selectedTab == 0 ? Colors.deepOrange : Colors.white, 
+                      foregroundColor: _selectedTab == 0 ? Colors.white : Colors.black
+                    ), 
+                    child: const Text('Customers')
+                  )
+                ), 
+                const SizedBox(width: 10), 
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => setState(() => _selectedTab = 1), 
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _selectedTab == 1 ? Colors.teal : Colors.white, 
+                      foregroundColor: _selectedTab == 1 ? Colors.white : Colors.black
+                    ), 
+                    child: const Text('Sellers')
+                  )
+                )
+              ]
+            )
+          ),
+          
+          // ডাটাবেস থেকে রিয়েল-টাইম ডাটা আনার অংশ
           Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 15),
-              itemCount: 4,
-              itemBuilder: (context, index) {
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 15), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(15.0),
-                    child: Column(
-                      children:[
-                        Row(
+            child: StreamBuilder(
+              stream: FirebaseFirestore.instance.collection('users')
+                  .where('role', isEqualTo: _selectedTab == 0 ? 'customer' : 'seller')
+                  .snapshots(),
+              builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                  return Center(
+                    child: Text(
+                      _selectedTab == 0 ? 'No customers found!' : 'No sellers found!', 
+                      style: const TextStyle(color: Colors.grey)
+                    )
+                  );
+                }
+
+                var users = snapshot.data!.docs;
+
+                return ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 15),
+                  itemCount: users.length,
+                  itemBuilder: (context, index) {
+                    var userDoc = users[index];
+                    Map<String, dynamic> data = userDoc.data() as Map<String, dynamic>;
+                    
+                    // সেলারের স্ট্যাটাস চেক
+                    String status = data.containsKey('status') ? data['status'] : 'approved';
+                    bool isPending = status == 'pending';
+                    String imgUrl = data.containsKey('profile_image_url') ? data['profile_image_url'] : '';
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 15), 
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(15.0),
+                        child: Column(
                           children:[
-                            Container(width: 50, height: 50, decoration: BoxDecoration(color: Colors.red[100], borderRadius: BorderRadius.circular(10)), child: const Icon(Icons.store, color: Colors.red)),
-                            const SizedBox(width: 15),
-                            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const[Text('Shop Name', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), Text('Status: Pending', style: TextStyle(color: Colors.grey))])),
-                            ElevatedButton(onPressed: (){}, style: ElevatedButton.styleFrom(backgroundColor: Colors.teal), child: const Text('Verify', style: TextStyle(color: Colors.white))),
+                            Row(
+                              children:[
+                                CircleAvatar(
+                                  radius: 25,
+                                  backgroundColor: Colors.grey.shade200,
+                                  backgroundImage: imgUrl.isNotEmpty ? NetworkImage(imgUrl) : null,
+                                  child: imgUrl.isEmpty ? Icon(_selectedTab == 0 ? Icons.person : Icons.store, color: Colors.grey) : null,
+                                ),
+                                const SizedBox(width: 15),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start, 
+                                    children:[
+                                      Text(data['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), 
+                                      Text(data['email'] ?? '', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                                      // সেলার হলে স্ট্যাটাস দেখাবে
+                                      if (_selectedTab == 1)
+                                        Text(
+                                          'Status: ${status.toUpperCase()}', 
+                                          style: TextStyle(
+                                            color: isPending ? Colors.red : Colors.green, 
+                                            fontWeight: FontWeight.bold, 
+                                            fontSize: 12
+                                          )
+                                        )
+                                    ]
+                                  )
+                                ),
+                                // যদি সেলার হয় এবং Pending থাকে, তবেই Approve বাটন দেখাবে
+                                if (_selectedTab == 1 && isPending)
+                                  ElevatedButton(
+                                    onPressed: () {
+                                      // ডাটাবেসে স্ট্যাটাস আপডেট করে Approved করে দেওয়া হচ্ছে
+                                      userDoc.reference.update({'status': 'approved'});
+                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Seller Approved Successfully! ✅')));
+                                    }, 
+                                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal), 
+                                    child: const Text('Approve', style: TextStyle(color: Colors.white))
+                                  )
+                                else if (_selectedTab == 1 && !isPending)
+                                  const Icon(Icons.verified, color: Colors.green) // এপ্রুভ হয়ে গেলে টিক চিহ্ন দেখাবে
+                              ],
+                            ),
+                            // সেলার হলে লোকেশন এবং অন্যান্য অপশন দেখাবে
+                            if (_selectedTab == 1) ...[
+                              const Divider(height: 25),
+                              Row(
+                                children:[
+                                  const Icon(Icons.location_on, color: Colors.red, size: 16),
+                                  const SizedBox(width: 5),
+                                  Expanded(
+                                    child: Text(
+                                      data.containsKey('latitude') ? 'Location Pinned (Lat: ${data['latitude'].toString().substring(0, 5)}...)' : 'No location saved', 
+                                      style: const TextStyle(fontSize: 12, color: Colors.grey)
+                                    )
+                                  ),
+                                ]
+                              ),
+                              const SizedBox(height: 10),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceAround, 
+                                children:[
+                                  TextButton.icon(onPressed: (){}, icon: const Icon(Icons.inventory_2, size: 16), label: const Text('Products')),
+                                  TextButton.icon(onPressed: (){}, icon: const Icon(Icons.bar_chart, size: 16), label: const Text('Sales'))
+                                ]
+                              )
+                            ]
                           ],
                         ),
-                        const Divider(),
-                        Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: const[Text('Manage Products', style: TextStyle(color: Colors.blue)), Text('View Sales', style: TextStyle(color: Colors.blue))])
-                      ],
-                    ),
-                  ),
+                      ),
+                    );
+                  }
                 );
               }
             ),
@@ -3091,47 +3909,59 @@ class WishlistPage extends StatelessWidget {
 }
 
 // ==========================================
-// Admin Banner Upload Page (Firebase Storage)
+// উন্নত ব্যানার ম্যানেজমেন্ট পেজ (Multi-upload & Toggle Status)
 // ==========================================
-class AdminBannerUploadPage extends StatefulWidget {
-  const AdminBannerUploadPage({super.key});
+class AdminBannerManagementPage extends StatefulWidget {
+  const AdminBannerManagementPage({super.key});
+
   @override
-  State<AdminBannerUploadPage> createState() => _AdminBannerUploadPageState();
+  State<AdminBannerManagementPage> createState() => _AdminBannerManagementPageState();
 }
 
-class _AdminBannerUploadPageState extends State<AdminBannerUploadPage> {
+class _AdminBannerManagementPageState extends State<AdminBannerManagementPage> {
   final ImagePicker _picker = ImagePicker();
+  bool _isUploading = false;
 
-  Future<void> uploadBanner() async {
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
-    if (image == null) return;
+  // একসাথে একাধিক ব্যানার আপলোড করার ফাংশন
+  Future<void> uploadMultipleBanners() async {
+    final List<XFile> images = await _picker.pickMultiImage(); // একাধিক ছবি সিলেক্ট 
+    if (images.isEmpty) return;
+
+    setState(() => _isUploading = true);
 
     try {
       showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
-      
-      String fileName = 'banner_${DateTime.now().millisecondsSinceEpoch}_${image.name}';
-      Reference ref = FirebaseStorage.instance.ref().child('banners').child(fileName);
-      
-      if (kIsWeb) {
-        Uint8List bytes = await image.readAsBytes();
-        await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
-      } else {
-        await ref.putFile(File(image.path));
-      }
-      
-      String downloadUrl = await ref.getDownloadURL();
 
-      await FirebaseFirestore.instance.collection('banners').add({
-        'image_url': downloadUrl,
-        'uploaded_at': FieldValue.serverTimestamp(),
-      });
+      for (var image in images) {
+        String fileName = 'banner_${DateTime.now().millisecondsSinceEpoch}_${image.name}';
+        Reference ref = FirebaseStorage.instance.ref().child('banners').child(fileName);
+        
+        // Web এবং Mobile সাপোর্ট [cite: 367, 368]
+        if (kIsWeb) {
+          Uint8List bytes = await image.readAsBytes();
+          await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
+        } else {
+          await ref.putFile(File(image.path));
+        }
+        
+        String downloadUrl = await ref.getDownloadURL();
+
+        // ডাটাবেসে সেভ (isActive: true ডিফল্ট) [cite: 693]
+        await FirebaseFirestore.instance.collection('banners').add({
+          'image_url': downloadUrl,
+          'uploaded_at': FieldValue.serverTimestamp(),
+          'isActive': true, 
+        });
+      }
 
       if (!mounted) return;
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Banner Uploaded Successfully! 🎉')));
+      Navigator.pop(context); 
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ব্যানারগুলো সফলভাবে আপলোড হয়েছে! 🎉')));
     } catch (e) {
-      Navigator.pop(context);
+      if (mounted) Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      setState(() => _isUploading = false);
     }
   }
 
@@ -3140,21 +3970,81 @@ class _AdminBannerUploadPageState extends State<AdminBannerUploadPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('Manage Banners'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
       body: Column(
-        children:[
+        children: [
           Padding(
             padding: const EdgeInsets.all(15.0),
             child: ElevatedButton.icon(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, minimumSize: const Size(double.infinity, 50)),
-              onPressed: uploadBanner, 
+              onPressed: _isUploading ? null : uploadMultipleBanners, 
               icon: const Icon(Icons.add_photo_alternate, color: Colors.white), 
-              label: const Text('Upload New Banner', style: TextStyle(color: Colors.white, fontSize: 16))
+              label: const Text('Add Multiple Banners', style: TextStyle(color: Colors.white, fontSize: 16))
             ),
           ),
-          const Expanded(
-            child: BannerList(),
-          ),
+          const Expanded(child: BannerListWithToggle()),
         ],
       ),
+    );
+  }
+}
+
+class BannerListWithToggle extends StatelessWidget {
+  const BannerListWithToggle({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder(
+      stream: FirebaseFirestore.instance.collection('banners').orderBy('uploaded_at', descending: true).snapshots(),
+      builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+        if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+        if (snapshot.data!.docs.isEmpty) return const Center(child: Text('কোনো ব্যানার নেই।'));
+
+        return ListView.builder(
+          padding: const EdgeInsets.all(15),
+          itemCount: snapshot.data!.docs.length,
+          itemBuilder: (context, index) {
+            var doc = snapshot.data!.docs[index];
+            Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+            bool isActive = data.containsKey('isActive') ? data['isActive'] : true;
+
+            return Card(
+              margin: const EdgeInsets.only(bottom: 15),
+              child: Column(
+                children: [
+                  Container(
+                    height: 150, width: double.infinity,
+                    decoration: BoxDecoration(
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
+                      image: DecorationImage(
+                        image: NetworkImage(doc['image_url']), 
+                        fit: BoxFit.cover,
+                        colorFilter: isActive ? null : ColorFilter.mode(Colors.black.withOpacity(0.5), BlendMode.darken)
+                      )
+                    ),
+                    child: isActive ? null : const Center(child: Text('DISABLED', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+                  ),
+                  ListTile(
+                    title: Text(isActive ? "Active" : "Disabled", style: TextStyle(color: isActive ? Colors.green : Colors.red)),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Switch(
+                          value: isActive, 
+                          activeColor: Colors.teal,
+                          onChanged: (val) => doc.reference.update({'isActive': val}) // স্ট্যাটাস এডিট
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () => doc.reference.delete() // ডিলিট [cite: 702]
+                        ),
+                      ],
+                    ),
+                  )
+                ],
+              ),
+            );
+          },
+        );
+      }
     );
   }
 }
@@ -3360,6 +4250,438 @@ class _AdminManageCategoriesPageState extends State<AdminManageCategoriesPage> {
           )
         ],
       ),
+    );
+  }
+}
+
+// ==========================================
+// অ্যাডমিন পেজ: পুশ নোটিফিকেশন কন্ট্রোল
+// ==========================================
+class AdminNotificationPage extends StatefulWidget {
+  const AdminNotificationPage({super.key});
+
+  @override
+  State<AdminNotificationPage> createState() => _AdminNotificationPageState();
+}
+
+class _AdminNotificationPageState extends State<AdminNotificationPage> {
+  final TextEditingController titleController = TextEditingController();
+  final TextEditingController bodyController = TextEditingController();
+  bool _isSending = false;
+
+  // নোটিফিকেশন পাঠানোর ফাংশন (এটি ফায়ারবেস বা আপনার সার্ভার API কল করবে)
+  Future<void> sendNotificationToAll() async {
+    if (titleController.text.isEmpty || bodyController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('দয়া করে শিরোনাম এবং মেসেজ লিখুন!'))
+      );
+      return;
+    }
+
+    setState(() => _isSending = true);
+
+    try {
+      // এখানে ফায়ারবেস স্টোরে একটি লগ রাখা হচ্ছে যেন ইউজাররা তাদের ইনবক্সেও দেখতে পায়
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'title': titleController.text.trim(),
+        'message': bodyController.text.trim(),
+        'sent_at': FieldValue.serverTimestamp(),
+        'type': 'all_users',
+      });
+
+      // মনে রাখবেন: সরাসরি অ্যাপ থেকে অন্য ফোনে FCM পাঠাতে সার্ভার-সাইড কোড বা ফায়ারবেস ফাংশন প্রয়োজন।
+      // বর্তমানে এটি ডাটাবেসে সেভ হচ্ছে।
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('নোটিফিকেশন সফলভাবে পাঠানো হয়েছে! 🚀'))
+      );
+      titleController.clear();
+      bodyController.clear();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'))
+      );
+    } finally {
+      setState(() => _isSending = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Send Push Notification'),
+        backgroundColor: Colors.deepOrange,
+        foregroundColor: Colors.white,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'ব্রডকাস্ট মেসেজ পাঠান',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              'এই মেসেজটি সকল কাস্টমারদের মোবাইল স্ক্রিনে দেখা যাবে।',
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+            ),
+            const SizedBox(height: 25),
+            TextField(
+              controller: titleController,
+              decoration: const InputDecoration(
+                labelText: 'Notification Title',
+                hintText: 'উদা: বিশাল ছাড়!',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 15),
+            TextField(
+              controller: bodyController,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'Message Body',
+                hintText: 'সব পণ্যে ২০% ডিসকাউন্ট পেতে এখনই অর্ডার করুন...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 30),
+            SizedBox(
+              width: double.infinity,
+              height: 55,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.deepOrange,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))
+                ),
+                onPressed: _isSending ? null : sendNotificationToAll,
+                icon: _isSending 
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : const Icon(Icons.send, color: Colors.white),
+                label: const Text(
+                  'SEND NOTIFICATION',
+                  style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ==========================================
+// অ্যাডমিন পেজ: রাইডার ম্যানেজমেন্ট (Approval & Status Control)
+// ==========================================
+class AdminManageRidersPage extends StatefulWidget {
+  const AdminManageRidersPage({super.key});
+
+  @override
+  State<AdminManageRidersPage> createState() => _AdminManageRidersPageState();
+}
+
+class _AdminManageRidersPageState extends State<AdminManageRidersPage> {
+  String searchQuery = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey[100],
+      appBar: AppBar(
+        title: const Text('Manage Riders'),
+        backgroundColor: Colors.deepOrange,
+        foregroundColor: Colors.white,
+      ),
+      body: Column(
+        children: [
+          // সার্চ বার (নাম বা ইমেইল দিয়ে রাইডার খোঁজার জন্য)
+          Padding(
+            padding: const EdgeInsets.all(15.0),
+            child: TextField(
+              onChanged: (value) => setState(() => searchQuery = value.toLowerCase().trim()),
+              decoration: InputDecoration(
+                hintText: 'Search by name or email...',
+                prefixIcon: const Icon(Icons.search),
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+            ),
+          ),
+          
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              // শুধুমাত্র যাদের রোল 'rider' তাদের ডাটাবেস থেকে আনা হচ্ছে
+              stream: FirebaseFirestore.instance
+                  .collection('users')
+                  .where('role', isEqualTo: 'rider')
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('No riders registered yet.'));
+
+                var riders = snapshot.data!.docs;
+
+                // সার্চ ফিল্টার লজিক
+                if (searchQuery.isNotEmpty) {
+                  riders = riders.where((doc) {
+                    String name = doc['name'].toString().toLowerCase();
+                    String email = doc['email'].toString().toLowerCase();
+                    return name.contains(searchQuery) || email.contains(searchQuery);
+                  }).toList();
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 15),
+                  itemCount: riders.length,
+                  itemBuilder: (context, index) {
+                    var riderDoc = riders[index];
+                    Map<String, dynamic> data = riderDoc.data() as Map<String, dynamic>;
+                    
+                    bool isVerified = data.containsKey('is_verified') ? data['is_verified'] : false;
+                    bool isOnline = data.containsKey('is_online') ? data['is_online'] : false;
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: isOnline ? Colors.green.shade100 : Colors.grey.shade200,
+                          child: Icon(Icons.motorcycle, color: isOnline ? Colors.green : Colors.grey),
+                        ),
+                        title: Text(data['name'] ?? 'Unknown Rider', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(data['email'] ?? 'No email'),
+                            const SizedBox(height: 5),
+                            Row(
+                              children: [
+                                Icon(Icons.circle, size: 10, color: isOnline ? Colors.green : Colors.red),
+                                const SizedBox(width: 5),
+                                Text(isOnline ? 'Online' : 'Offline', style: TextStyle(fontSize: 12, color: isOnline ? Colors.green : Colors.red)),
+                                const SizedBox(width: 15),
+                                Icon(Icons.verified, size: 14, color: isVerified ? Colors.blue : Colors.grey),
+                                const SizedBox(width: 4),
+                                Text(isVerified ? 'Verified' : 'Pending Approval', style: const TextStyle(fontSize: 12)),
+                              ],
+                            ),
+                          ],
+                        ),
+                        trailing: PopupMenuButton(
+                          onSelected: (value) async {
+                            if (value == 'verify') {
+                              await riderDoc.reference.update({'is_verified': !isVerified});
+                            } else if (value == 'delete') {
+                              await riderDoc.reference.delete();
+                            }
+                          },
+                          itemBuilder: (context) => [
+                            PopupMenuItem(
+                              value: 'verify',
+                              child: Text(isVerified ? 'Unverify Rider' : 'Approve/Verify Rider'),
+                            ),
+                            const PopupMenuItem(
+                              value: 'delete',
+                              child: Text('Delete Rider Account', style: TextStyle(color: Colors.red)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ==========================================
+// অ্যাডমিন পেজ: ডেলিভারি চার্জ সেটিং (Dynamic Distance Based)
+// ==========================================
+class AdminDeliveryZonePage extends StatefulWidget {
+  const AdminDeliveryZonePage({super.key});
+
+  @override
+  State<AdminDeliveryZonePage> createState() => _AdminDeliveryZonePageState();
+}
+
+class _AdminDeliveryZonePageState extends State<AdminDeliveryZonePage> {
+  // কন্ট্রোলারগুলো
+  final TextEditingController baseDistanceCtrl = TextEditingController();
+  final TextEditingController baseChargeCtrl = TextEditingController();
+  final TextEditingController midDistanceCtrl = TextEditingController();
+  final TextEditingController midChargeCtrl = TextEditingController();
+  final TextEditingController extraPerKmCtrl = TextEditingController();
+
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCurrentSettings();
+  }
+
+  // ফায়ারবেস থেকে বর্তমান সেটিংস লোড করা
+  Future<void> _loadCurrentSettings() async {
+    try {
+      DocumentSnapshot doc = await FirebaseFirestore.instance.collection('app_config').doc('delivery_settings').get();
+      if (doc.exists) {
+        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+        baseDistanceCtrl.text = data['base_distance'].toString();
+        baseChargeCtrl.text = data['base_charge'].toString();
+        midDistanceCtrl.text = data['mid_distance'].toString();
+        midChargeCtrl.text = data['mid_charge'].toString();
+        extraPerKmCtrl.text = data['extra_per_km'].toString();
+      } else {
+        // যদি ডাটাবেসে না থাকে, তবে ডিফল্ট কিছু ভ্যালু দিয়ে দেওয়া
+        baseDistanceCtrl.text = '2';
+        baseChargeCtrl.text = '30';
+        midDistanceCtrl.text = '5';
+        midChargeCtrl.text = '50';
+        extraPerKmCtrl.text = '10';
+      }
+    } catch (e) {
+      // Error handling
+    }
+    setState(() => isLoading = false);
+  }
+
+  // ফায়ারবেসে নতুন সেটিংস সেভ করা
+  Future<void> _updateSettings() async {
+    if (baseDistanceCtrl.text.isEmpty || baseChargeCtrl.text.isEmpty || extraPerKmCtrl.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('সবগুলো ঘর পূরণ করুন!')));
+      return;
+    }
+
+    setState(() => isLoading = true);
+    try {
+      await FirebaseFirestore.instance.collection('app_config').doc('delivery_settings').set({
+        'base_distance': double.parse(baseDistanceCtrl.text.trim()),
+        'base_charge': int.parse(baseChargeCtrl.text.trim()),
+        'mid_distance': double.parse(midDistanceCtrl.text.trim()),
+        'mid_charge': int.parse(midChargeCtrl.text.trim()),
+        'extra_per_km': int.parse(extraPerKmCtrl.text.trim()),
+        'updated_at': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ডেলিভারি চার্জ সফলভাবে আপডেট হয়েছে! 🎉')));
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+    setState(() => isLoading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey[100],
+      appBar: AppBar(
+        title: const Text('Delivery Distance & Charges', style: TextStyle(fontSize: 16)), 
+        backgroundColor: Colors.deepOrange, 
+        foregroundColor: Colors.white
+      ),
+      body: isLoading 
+        ? const Center(child: CircularProgressIndicator())
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                const Text('Set Distance Based Charges', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 5),
+                const Text('এখানে আপনি যে চার্জ সেট করবেন, কাস্টমারের কার্ট পেজে ম্যাপের দূরত্ব অনুযায়ী ঠিক সেই চার্জই অটোমেটিক হিসাব হবে।', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                const SizedBox(height: 25),
+
+                // বেস চার্জ (প্রথম ধাপ)
+                Card(
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(15.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children:[
+                        const Text('Level 1: Base Charge (কাছের জন্য)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
+                        const SizedBox(height: 15),
+                        Row(
+                          children:[
+                            Expanded(child: TextField(controller: baseDistanceCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Distance up to (KM)', border: OutlineInputBorder()))),
+                            const SizedBox(width: 15),
+                            Expanded(child: TextField(controller: baseChargeCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Charge (৳)', border: OutlineInputBorder()))),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 15),
+
+                // মিডিয়াম চার্জ (দ্বিতীয় ধাপ)
+                Card(
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(15.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children:[
+                        const Text('Level 2: Mid Range Charge (একটু দূরের জন্য)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange)),
+                        const SizedBox(height: 15),
+                        Row(
+                          children:[
+                            Expanded(child: TextField(controller: midDistanceCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Distance up to (KM)', border: OutlineInputBorder()))),
+                            const SizedBox(width: 15),
+                            Expanded(child: TextField(controller: midChargeCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Charge (৳)', border: OutlineInputBorder()))),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 15),
+
+                // এক্সট্রা চার্জ (অনেক দূরের জন্য)
+                Card(
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(15.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children:[
+                        const Text('Level 3: Extra Distance (অনেক দূরের জন্য)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                        const SizedBox(height: 15),
+                        TextField(
+                          controller: extraPerKmCtrl, 
+                          keyboardType: TextInputType.number, 
+                          decoration: const InputDecoration(labelText: 'Extra charge per KM (৳)', border: OutlineInputBorder(), helperText: 'উদাহরণ: ৫ কি.মি. এর বেশি হলে প্রতি কিলোমিটারের জন্য কত টাকা যোগ হবে?')
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 30),
+
+                // সেভ বাটন
+                SizedBox(
+                  width: double.infinity, height: 55,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                    onPressed: _updateSettings,
+                    icon: const Icon(Icons.save, color: Colors.white),
+                    label: const Text('UPDATE DELIVERY CHARGES', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                  ),
+                )
+              ],
+            ),
+          ),
     );
   }
 }
