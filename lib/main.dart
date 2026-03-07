@@ -1646,7 +1646,7 @@ class AdminDashboard extends StatelessWidget {
               title: const Text('Manage Categories', style: TextStyle(fontWeight: FontWeight.bold)),
               onTap: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Category management coming soon!')));
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManageCategoriesPage())); // নতুন পেজে যাবে
               },
             ),
             ListTile(
@@ -3201,6 +3201,165 @@ class BannerList extends StatelessWidget {
           },
         );
       }
+    );
+  }
+}
+
+// ==========================================
+// Admin Manage Categories Page (Firebase Storage & Firestore)
+// ==========================================
+class AdminManageCategoriesPage extends StatefulWidget {
+  const AdminManageCategoriesPage({super.key});
+
+  @override
+  State<AdminManageCategoriesPage> createState() => _AdminManageCategoriesPageState();
+}
+
+class _AdminManageCategoriesPageState extends State<AdminManageCategoriesPage> {
+  final TextEditingController categoryNameController = TextEditingController();
+  final ImagePicker _picker = ImagePicker();
+  XFile? selectedImage;
+
+  // গ্যালারি থেকে ক্যাটাগরির আইকন/ছবি সিলেক্ট করা
+  Future<void> pickImage() async {
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    if (image != null) {
+      setState(() {
+        selectedImage = image;
+      });
+    }
+  }
+
+  // ফায়ারবেসে ক্যাটাগরি আপলোড করা
+  Future<void> uploadCategory() async {
+    if (categoryNameController.text.isEmpty || selectedImage == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter name and select an image!')));
+      return;
+    }
+
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+      
+      // ১. ছবি স্টোরেজে আপলোড করা
+      String fileName = 'category_${DateTime.now().millisecondsSinceEpoch}_${selectedImage!.name}';
+      Reference ref = FirebaseStorage.instance.ref().child('category_images').child(fileName);
+      
+      if (kIsWeb) {
+        Uint8List bytes = await selectedImage!.readAsBytes();
+        await ref.putData(bytes, SettableMetadata(contentType: 'image/png'));
+      } else {
+        await ref.putFile(File(selectedImage!.path));
+      }
+      
+      String downloadUrl = await ref.getDownloadURL();
+
+      // ২. ডাটাবেসে ক্যাটাগরির নাম ও ছবির লিংক সেভ করা
+      await FirebaseFirestore.instance.collection('categories').add({
+        'name': categoryNameController.text.trim(),
+        'image_url': downloadUrl,
+        'created_at': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      Navigator.pop(context); // লোডিং বন্ধ
+      setState(() {
+        selectedImage = null;
+        categoryNameController.clear();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Category Added Successfully! 🎉')));
+    } catch (e) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey[100],
+      appBar: AppBar(title: const Text('Manage Categories'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
+      body: Column(
+        children:[
+          // ক্যাটাগরি আপলোডের ফর্ম
+          Container(
+            padding: const EdgeInsets.all(20),
+            color: Colors.white,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                const Text('Add New Category', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 15),
+                Row(
+                  children:[
+                    InkWell(
+                      onTap: pickImage,
+                      child: Container(
+                        height: 60, width: 60,
+                        decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.deepOrange)),
+                        child: selectedImage != null 
+                            ? (kIsWeb ? Image.network(selectedImage!.path, fit: BoxFit.cover) : Image.file(File(selectedImage!.path), fit: BoxFit.cover))
+                            : const Icon(Icons.add_photo_alternate, color: Colors.deepOrange),
+                      ),
+                    ),
+                    const SizedBox(width: 15),
+                    Expanded(
+                      child: TextField(
+                        controller: categoryNameController,
+                        decoration: const InputDecoration(labelText: 'Category Name (e.g. Mobile)', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, padding: const EdgeInsets.symmetric(vertical: 15)),
+                      onPressed: uploadCategory,
+                      child: const Text('ADD', style: TextStyle(color: Colors.white)),
+                    )
+                  ],
+                ),
+              ],
+            ),
+          ),
+          
+          const SizedBox(height: 10),
+          const Padding(padding: EdgeInsets.all(15.0), child: Align(alignment: Alignment.centerLeft, child: Text('Existing Categories', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)))),
+          
+          // ডাটাবেস থেকে রিয়েল-টাইম ক্যাটাগরি লিস্ট
+          Expanded(
+            child: StreamBuilder(
+              stream: FirebaseFirestore.instance.collection('categories').orderBy('created_at', descending: true).snapshots(),
+              builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('No categories found. Add some!'));
+
+                return ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 15),
+                  itemCount: snapshot.data!.docs.length,
+                  itemBuilder: (context, index) {
+                    var doc = snapshot.data!.docs[index];
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.grey.shade100,
+                          backgroundImage: NetworkImage(doc['image_url']),
+                        ),
+                        title: Text(doc['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () {
+                            // ডিলিট করার কমান্ড
+                            FirebaseFirestore.instance.collection('categories').doc(doc.id).delete();
+                          },
+                        ),
+                      ),
+                    );
+                  }
+                );
+              }
+            ),
+          )
+        ],
+      ),
     );
   }
 }
