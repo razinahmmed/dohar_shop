@@ -4109,6 +4109,13 @@ class _AdminManageCategoriesPageState extends State<AdminManageCategoriesPage> {
   final TextEditingController categoryNameController = TextEditingController();
   final ImagePicker _picker = ImagePicker();
   XFile? selectedImage;
+  // আপনার দেওয়া ক্যাটাগরি লিস্ট থেকে শুধু নামগুলো নেওয়া হলো
+  final List<String> presetCategories =[
+    'Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 
+    'Watches', 'Baby & Toys', 'Groceries', 'Automotive', 'Women\'s Bags',
+    'Men\'s Wallets', 'Muslim Fashion', 'Games & Hobbies', 'Computers',
+    'Sports & Outdoor', 'Men Shoes', 'Cameras', 'Travel & Luggage'
+  ];
 
   // গ্যালারি থেকে ক্যাটাগরির আইকন/ছবি সিলেক্ট করা
   Future<void> pickImage() async {
@@ -4195,7 +4202,30 @@ class _AdminManageCategoriesPageState extends State<AdminManageCategoriesPage> {
                     Expanded(
                       child: TextField(
                         controller: categoryNameController,
-                        decoration: const InputDecoration(labelText: 'Category Name (e.g. Mobile)', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)),
+                        decoration: InputDecoration(
+                          labelText: 'Category Name (e.g. Mobile)', 
+                          border: const OutlineInputBorder(), 
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                          // এই অংশটি ড্রপডাউন মেনু তৈরি করবে
+                          suffixIcon: PopupMenuButton<String>(
+                            icon: const Icon(Icons.arrow_drop_down, color: Colors.deepOrange, size: 30),
+                            tooltip: 'Select Category',
+                            onSelected: (String value) {
+                              // লিস্ট থেকে সিলেক্ট করলে টেক্সট বক্সে অটোমেটিক বসে যাবে
+                              setState(() {
+                                categoryNameController.text = value;
+                              });
+                            },
+                            itemBuilder: (BuildContext context) {
+                              return presetCategories.map((String choice) {
+                                return PopupMenuItem<String>(
+                                  value: choice,
+                                  child: Text(choice),
+                                );
+                              }).toList();
+                            },
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 10),
