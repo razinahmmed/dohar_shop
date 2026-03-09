@@ -10,7 +10,7 @@ plugins {
 
 android {
     namespace = "com.example.dohar_shop"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36 // এখানে ৩৬ করে দেওয়া হয়েছে প্লাগইনগুলোর চাহিদা অনুযায়ী
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -27,8 +27,8 @@ android {
         applicationId = "com.example.dohar_shop"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 21
-        targetSdk = flutter.targetSdkVersion
+        minSdk = flutter.minSdkVersion
+        targetSdk = 36 // এখানেও ৩৬ করে দেওয়া হয়েছে
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
