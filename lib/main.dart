@@ -13,12 +13,10 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:url_launcher/url_launcher.dart'; // একদম উপরে বসান
-import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart'; 
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'dart:async';
-import 'package:geolocator/geolocator.dart';
 
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
@@ -33,11 +31,95 @@ void main() async {
 
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
-  // এখন আর লগিন চেক করবে না, সরাসরি MainScreen এ ঢুকতে দেবে (Guest Mode)
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
-    home: MainScreen(), 
+    // [FIXED] সরাসরি MainScreen এর বদলে AuthWrapper এ যাবে
+    home: AuthWrapper(), 
   ));
+}
+
+// ==========================================
+// নতুন: Auth Checker / Splash Screen (Fixed Loading Issue & Super Admin)
+// ==========================================
+class AuthWrapper extends StatefulWidget {
+  const AuthWrapper({super.key});
+
+  @override
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
+
+class _AuthWrapperState extends State<AuthWrapper> {
+  @override
+  void initState() {
+    super.initState();
+    _checkUserRoleAndNavigate();
+  }
+
+  // এই ফাংশনটি চেক করবে ইউজার কে এবং তাকে তার পেজে পাঠিয়ে দিবে
+  Future<void> _checkUserRoleAndNavigate() async {
+    // অ্যাপ চালুর পর আধা সেকেন্ড অপেক্ষা করবে যাতে স্ক্রিন রেডি হয় এবং ফায়ারবেস সেশন রিস্টোর করতে পারে।
+    await Future.delayed(const Duration(milliseconds: 800));
+
+    User? user = FirebaseAuth.instance.currentUser;
+
+    // যদি কেউ লগিন না থাকে, তবে সাধারণ কাস্টমার পেজ (Guest Mode) দেখাবে
+    if (user == null) {
+      if (mounted) {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+      }
+      return;
+    }
+
+    try {
+      // ইউজারের রোল ফায়ারবেস থেকে আনা হচ্ছে
+      DocumentSnapshot doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      
+      if (!mounted) return;
+
+      if (doc.exists) {
+        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+        String role = data.containsKey('role') ? data['role'] : 'customer';
+
+        // [FIXED] রোল অনুযায়ী সঠিক পেজে রিডাইরেক্ট (admin অথবা super_admin হলে অ্যাডমিন প্যানেলে যাবে)
+        if (role == 'admin' || role == 'super_admin') {
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const AdminMainScreen()));
+        } else if (role == 'seller') {
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
+        } else if (role == 'rider') {
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const RiderMainScreen()));
+        } else {
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+        }
+      } else {
+        // ফায়ারবেসে ডাটা না থাকলে ডিফল্ট কাস্টমার পেজ
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // চেকিং চলার সময় স্ক্রিনে সুন্দর একটি স্প্ল্যাশ স্ক্রিন দেখাবে
+    return const Scaffold(
+      backgroundColor: Colors.deepOrange,
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children:[
+            Icon(Icons.shopping_cart_checkout, size: 80, color: Colors.white),
+            SizedBox(height: 20),
+            CircularProgressIndicator(color: Colors.white),
+            SizedBox(height: 10),
+            Text('Loading D Shop...', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 // ==========================================
@@ -2123,7 +2205,7 @@ class _UserDashboardState extends State<UserDashboard> {
 }
 
 // ==========================================
-// লগিন পেজ (Login Page)
+// লগিন পেজ (Login Page with Super Admin Support)
 // ==========================================
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -2165,7 +2247,8 @@ class _LoginPageState extends State<LoginPage> {
         role = userDoc['role'];
       }
 
-      if (role == 'admin') {
+      // [FIXED] admin অথবা super_admin হলে অ্যাডমিন প্যানেলে যাবে
+      if (role == 'admin' || role == 'super_admin') {
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const AdminMainScreen()));
       } else if (role == 'seller') {
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
@@ -2489,11 +2572,18 @@ class _SellerMainScreenState extends State<SellerMainScreen> {
 }
 
 // ==========================================
-// সেলার ড্যাশবোর্ড: রিয়েল ডাটা (Dynamic)
+// সেলার ড্যাশবোর্ড: রিয়েল ডাটা + Smart Product Insights
 // ==========================================
-class SellerDashboard extends StatelessWidget {
+class SellerDashboard extends StatefulWidget {
   const SellerDashboard({super.key});
-  
+
+  @override
+  State<SellerDashboard> createState() => _SellerDashboardState();
+}
+
+class _SellerDashboardState extends State<SellerDashboard> {
+  String _selectedFilter = 'Low Stock'; // ডিফল্ট ফিল্টার
+
   @override 
   Widget build(BuildContext context) {
     User? currentUser = FirebaseAuth.instance.currentUser;
@@ -2511,7 +2601,9 @@ class SellerDashboard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
-            // ফায়ারবেস থেকে সেলারের রিয়েল ডাটা আনা হচ্ছে
+            // =====================================
+            // Header: Seller Profile
+            // =====================================
             FutureBuilder<DocumentSnapshot>(
               future: FirebaseFirestore.instance.collection('users').doc(currentUser.uid).get(),
               builder: (context, snapshot) {
@@ -2533,7 +2625,7 @@ class SellerDashboard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start, 
                       children:[
                         Text(shopName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), 
-                        Text('Seller ID: #${currentUser.uid.substring(0, 6).toUpperCase()}', style: const TextStyle(color: Colors.grey)) // রিয়েল আইডি
+                        Text('Seller ID: #${currentUser.uid.substring(0, 6).toUpperCase()}', style: const TextStyle(color: Colors.grey))
                       ]
                     )
                   ]
@@ -2541,30 +2633,179 @@ class SellerDashboard extends StatelessWidget {
               }
             ),
             const SizedBox(height: 25),
+
+            // =====================================
+            // Stats & Quick Actions
+            // =====================================
             const Text('Overall Performance', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 15),
-            Row(children:[_buildStatCard("Today's Sales", "৳০", Colors.teal[50]!, Colors.teal), const SizedBox(width: 15), _buildStatCard("Active Orders", "০", Colors.orange[50]!, Colors.orange)]),
+            Row(children:[
+              _buildStatCard("Today's Sales", "৳০", Colors.teal[50]!, Colors.teal), 
+              const SizedBox(width: 15), 
+              _buildStatCard("Active Orders", "০", Colors.orange[50]!, Colors.orange)
+            ]),
             const SizedBox(height: 25),
             
-            const Text('QUICK ACTION', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 10),
+            const Text('QUICK ACTION', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)), 
+            const SizedBox(height: 10),
             Row(
               children:[
                 _buildQuickAction(Icons.add_circle_outline, "Add Product", Colors.teal, () => Navigator.push(context, MaterialPageRoute(builder: (context) => const AddProductPage()))), 
                 const SizedBox(width: 15), 
-                _buildQuickAction(Icons.shopping_cart, "Go to Shopping", Colors.deepOrange, () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()))) // সেলার শপিং করতে পারবে
+                _buildQuickAction(Icons.shopping_cart, "Go to Shopping", Colors.deepOrange, () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen())))
               ]
+            ),
+            
+            const SizedBox(height: 30),
+            const Divider(height: 1, thickness: 1),
+            const SizedBox(height: 20),
+
+            // =====================================
+            // NEW: Product Insights / Overview
+            // =====================================
+            const Text('Product Insights', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            
+            // Filter Buttons (Tabs)
+            Row(
+              children:[
+                _buildFilterChip('Low Stock', Icons.warning_amber_rounded, Colors.red),
+                const SizedBox(width: 10),
+                _buildFilterChip('Top Sales', Icons.trending_up, Colors.blue),
+                const SizedBox(width: 10),
+                _buildFilterChip('Newest', Icons.new_releases, Colors.green),
+              ],
+            ),
+            const SizedBox(height: 15),
+
+            // Product List based on filter
+            StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance.collection('products').where('seller_id', isEqualTo: currentUser.uid).snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) return const Padding(padding: EdgeInsets.all(20), child: Center(child: CircularProgressIndicator()));
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Padding(padding: EdgeInsets.all(20), child: Center(child: Text('No products uploaded yet.')));
+
+                var allProducts = snapshot.data!.docs;
+                List<QueryDocumentSnapshot> displayList =[];
+
+                // ফিল্টারিং লজিক (Local Sorting to avoid Firebase Index Error)
+                if (_selectedFilter == 'Low Stock') {
+                  displayList = allProducts.where((doc) {
+                    int stock = int.tryParse((doc.data() as Map<String, dynamic>)['stock'].toString()) ?? 0;
+                    return stock <= 5; // ৫ বা তার কম হলে লো-স্টক হিসেবে ধরবে
+                  }).toList();
+                } 
+                else if (_selectedFilter == 'Top Sales') {
+                  displayList = allProducts.toList();
+                  displayList.sort((a, b) {
+                    int salesA = (a.data() as Map<String, dynamic>)['sales_count'] ?? 0;
+                    int salesB = (b.data() as Map<String, dynamic>)['sales_count'] ?? 0;
+                    return salesB.compareTo(salesA); // Descending (High to Low)
+                  });
+                } 
+                else if (_selectedFilter == 'Newest') {
+                  displayList = allProducts.toList();
+                  displayList.sort((a, b) {
+                    Timestamp? tA = (a.data() as Map<String, dynamic>)['timestamp'] as Timestamp?;
+                    Timestamp? tB = (b.data() as Map<String, dynamic>)['timestamp'] as Timestamp?;
+                    if (tA == null || tB == null) return 0;
+                    return tB.compareTo(tA); // Newest first
+                  });
+                }
+
+                if (displayList.isEmpty) {
+                  return Container(
+                    width: double.infinity, padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+                    child: Text(_selectedFilter == 'Low Stock' ? 'Great! All products have sufficient stock. 🎉' : 'No data available for this filter.', textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey)),
+                  );
+                }
+
+                // লিস্ট ভিউ
+                return ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(), // মেইন স্ক্রলবার কাজ করার জন্য
+                  itemCount: displayList.length > 5 ? 5 : displayList.length, // সর্বোচ্চ ৫টি দেখাবে
+                  itemBuilder: (context, index) {
+                    var doc = displayList[index];
+                    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+                    String firstImage = data.containsKey('image_urls') && (data['image_urls'] as List).isNotEmpty ? data['image_urls'][0] : '';
+                    int stock = int.tryParse(data['stock'].toString()) ?? 0;
+                    int sales = data['sales_count'] ?? 0;
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      child: ListTile(
+                        leading: Container(
+                          width: 50, height: 50, 
+                          decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)), 
+                          child: firstImage.isNotEmpty ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(firstImage, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey)
+                        ),
+                        title: Text(data['product_name'] ?? 'Product', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                        subtitle: Text('৳${data['price']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+                        trailing: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children:[
+                            if (_selectedFilter == 'Low Stock') ...[
+                              const Text('Stock Left', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                              Text('$stock', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                            ] else if (_selectedFilter == 'Top Sales') ...[
+                              const Text('Total Sold', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                              Text('$sales', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                            ] else ...[
+                              const Text('Stock', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                              Text('$stock', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                            ]
+                          ],
+                        ),
+                      ),
+                    );
+                  }
+                );
+              }
             ),
           ],
         ),
       ),
     );
   }
-  Widget _buildStatCard(String title, String value, Color bgColor, Color textColor) {return Expanded(child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(15)), child: Column(children:[Text(title, style: const TextStyle(fontSize: 14)), const SizedBox(height: 5), Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: textColor))]))); }
-  Widget _buildQuickAction(IconData icon, String label, Color color, VoidCallback onTap) {return Expanded(child: InkWell(onTap: onTap, child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(15), border: Border.all(color: color.withOpacity(0.3))), child: Column(children:[Icon(icon, color: color, size: 30), const SizedBox(height: 5), Text(label, style: TextStyle(fontWeight: FontWeight.bold, color: color))]))));}
+
+  // হেল্পার উইজেট: Filter Chips
+  Widget _buildFilterChip(String label, IconData icon, Color color) {
+    bool isSelected = _selectedFilter == label;
+    return InkWell(
+      onTap: () => setState(() => _selectedFilter = label),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? color : Colors.white,
+          border: Border.all(color: isSelected ? color : Colors.grey.shade300),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          children:[
+            Icon(icon, size: 14, color: isSelected ? Colors.white : color),
+            const SizedBox(width: 5),
+            Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isSelected ? Colors.white : Colors.black87)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // হেল্পার উইজেট: Stat Cards & Actions (আগেরগুলোই আছে)
+  Widget _buildStatCard(String title, String value, Color bgColor, Color textColor) {
+    return Expanded(child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(15)), child: Column(children:[Text(title, style: const TextStyle(fontSize: 14)), const SizedBox(height: 5), Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: textColor))]))); 
+  }
+  Widget _buildQuickAction(IconData icon, String label, Color color, VoidCallback onTap) {
+    return Expanded(child: InkWell(onTap: onTap, child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(15), border: Border.all(color: color.withOpacity(0.3))), child: Column(children:[Icon(icon, color: color, size: 30), const SizedBox(height: 5), Text(label, style: TextStyle(fontWeight: FontWeight.bold, color: color))]))));
+  }
 }
 
 // ==========================================
-// সেলার প্রোডাক্ট ম্যানেজমেন্ট: রিয়েল ডাটা (Index Fixed)
+// সেলার প্রোডাক্ট ম্যানেজমেন্ট: (Edit, Disable & Delete)
 // ==========================================
 class ProductManagement extends StatelessWidget {
   const ProductManagement({super.key});
@@ -2574,28 +2815,21 @@ class ProductManagement extends StatelessWidget {
     User? currentUser = FirebaseAuth.instance.currentUser;
 
     return Scaffold(
+      backgroundColor: Colors.grey.shade50,
       appBar: AppBar(backgroundColor: Colors.amber[200], elevation: 0, title: const Text('PRODUCT MANAGEMENT', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)), leading: const Icon(Icons.arrow_back_ios, color: Colors.black)),
       body: Column(
         children:[
-          Padding(padding: const EdgeInsets.all(15.0), child: TextField(decoration: InputDecoration(hintText: 'Search for products...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10))))),
+          Padding(padding: const EdgeInsets.all(15.0), child: TextField(decoration: InputDecoration(hintText: 'Search for products...', prefixIcon: const Icon(Icons.search), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none)))),
           
           Expanded(
             child: StreamBuilder(
-              // [FIXED] .orderBy বাদ দেওয়া হয়েছে যাতে Index Error না আসে
               stream: FirebaseFirestore.instance.collection('products')
                   .where('seller_id', isEqualTo: currentUser?.uid)
                   .snapshots(),
               builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                if (snapshot.hasError) {
-                  return Center(child: Text('Error: ${snapshot.error}', style: const TextStyle(color: Colors.red)));
-                }
                 if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
-                
-                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                  return const Center(child: Text('You have not uploaded any products yet.'));
-                }
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('You have not uploaded any products yet.'));
 
-                // ডাটাবেস এর বদলে অ্যাপের ভেতরেই লেটেস্ট প্রোডাক্ট আগে দেখানোর জন্য Sort করা হচ্ছে
                 var docs = snapshot.data!.docs;
                 docs.sort((a, b) {
                   var dataA = a.data() as Map<String, dynamic>;
@@ -2614,25 +2848,73 @@ class ProductManagement extends StatelessWidget {
                     Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
                     String firstImage = data.containsKey('image_urls') && (data['image_urls'] as List).isNotEmpty ? data['image_urls'][0] : '';
                     String status = data['status'] ?? 'pending';
+                    
+                    // প্রোডাক্ট একটিভ আছে কি না (Hide/Unhide)
+                    bool isActive = data.containsKey('is_active') ? data['is_active'] : true;
 
                     return Card(
                       margin: const EdgeInsets.only(bottom: 15), 
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), 
-                      child: ListTile(
-                        leading: Container(
-                          width: 60, height: 60, 
-                          decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(8)), 
-                          child: firstImage.isNotEmpty ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(firstImage, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey)
-                        ), 
-                        title: Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14), maxLines: 1, overflow: TextOverflow.ellipsis), 
-                        subtitle: Text('Price: ৳${data['price']}\nStock: ${data['stock']} | Status: ${status.toUpperCase()}', style: TextStyle(fontSize: 12, color: status == 'approved' ? Colors.green : (status == 'rejected' ? Colors.red : Colors.orange))), 
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red),
-                          onPressed: () {
-                            doc.reference.delete();
-                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product Deleted!')));
-                          },
-                        )
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children:[
+                            Container(
+                              width: 70, height: 70, 
+                              decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)), 
+                              child: firstImage.isNotEmpty ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(firstImage, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey)
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children:[
+                                  Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14), maxLines: 2, overflow: TextOverflow.ellipsis), 
+                                  const SizedBox(height: 5),
+                                  Text('Price: ৳${data['price']} | Stock: ${data['stock']}'),
+                                  const SizedBox(height: 5),
+                                  Row(
+                                    children:[
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(color: status == 'approved' ? Colors.green.shade50 : (status == 'rejected' ? Colors.red.shade50 : Colors.orange.shade50), borderRadius: BorderRadius.circular(5)),
+                                        child: Text(status.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: status == 'approved' ? Colors.green : (status == 'rejected' ? Colors.red : Colors.orange))),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      if (!isActive)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(5)),
+                                          child: const Text('HIDDEN', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
+                                        ),
+                                    ],
+                                  )
+                                ],
+                              ),
+                            ),
+                            
+                            // থ্রি-ডট মেনু (Edit, Hide, Delete)
+                            PopupMenuButton<String>(
+                              onSelected: (value) {
+                                if (value == 'edit') {
+                                  Navigator.push(context, MaterialPageRoute(builder: (context) => EditProductPage(productId: doc.id, productData: data)));
+                                } else if (value == 'toggle_visibility') {
+                                  doc.reference.update({'is_active': !isActive});
+                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(isActive ? 'Product hidden from shop!' : 'Product is now visible!')));
+                                } else if (value == 'delete') {
+                                  doc.reference.delete();
+                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product Deleted!')));
+                                }
+                              },
+                              itemBuilder: (context) => [
+                                const PopupMenuItem(value: 'edit', child: Row(children:[Icon(Icons.edit, color: Colors.blue, size: 20), SizedBox(width: 10), Text('Edit Product')])),
+                                PopupMenuItem(value: 'toggle_visibility', child: Row(children:[Icon(isActive ? Icons.visibility_off : Icons.visibility, color: Colors.grey, size: 20), SizedBox(width: 10), Text(isActive ? 'Hide Product' : 'Show Product')])),
+                                const PopupMenuItem(value: 'delete', child: Row(children:[Icon(Icons.delete, color: Colors.red, size: 20), SizedBox(width: 10), Text('Delete')])),
+                              ],
+                            )
+                          ],
+                        ),
                       )
                     );
                   }
@@ -2648,37 +2930,659 @@ class ProductManagement extends StatelessWidget {
 }
 
 // ==========================================
-// সেলার অর্ডার ম্যানেজমেন্ট 
+// নতুন পেজ: Edit Product Page (With Re-Approval Logic)
 // ==========================================
-class SellerOrderManagement extends StatelessWidget {
-  const SellerOrderManagement({super.key});
-  @override Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 4,
-      child: Scaffold(
-        appBar: AppBar(backgroundColor: Colors.amber[200], title: const Text('ORDER MANAGEMENT', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), bottom: const TabBar(isScrollable: true, labelColor: Colors.black, indicatorColor: Colors.deepOrange, tabs:[Tab(text: 'All Orders'), Tab(text: 'Pending'), Tab(text: 'Shipped'), Tab(text: 'Delivered')])),
-        body: ListView.builder(padding: const EdgeInsets.all(15), itemCount: 4, itemBuilder: (context, index) {return Container(margin: const EdgeInsets.only(bottom: 15), padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey[200]!)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Order ID: 210977', style: TextStyle(fontWeight: FontWeight.bold)), Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3), decoration: BoxDecoration(color: Colors.amber[100], borderRadius: BorderRadius.circular(10)), child: const Text('Pending', style: TextStyle(fontSize: 12, color: Colors.orange)))]), const Text('Customer: Jane Doe', style: TextStyle(color: Colors.grey)), const Divider(), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Total Value: ৳৩,২০০'), ElevatedButton(onPressed: () {}, style: ElevatedButton.styleFrom(backgroundColor: Colors.blue), child: const Text('Update Status', style: TextStyle(color: Colors.white)))])]));}),
+class EditProductPage extends StatefulWidget {
+  final String productId;
+  final Map<String, dynamic> productData;
+
+  const EditProductPage({super.key, required this.productId, required this.productData});
+
+  @override
+  State<EditProductPage> createState() => _EditProductPageState();
+}
+
+class _EditProductPageState extends State<EditProductPage> {
+  late TextEditingController nameController;
+  late TextEditingController priceController;
+  late TextEditingController stockController;
+  late TextEditingController descController;
+
+  @override
+  void initState() {
+    super.initState();
+    // আগের ডাটাগুলো বক্সে অটোমেটিক বসিয়ে দেওয়া হচ্ছে
+    nameController = TextEditingController(text: widget.productData['product_name']);
+    priceController = TextEditingController(text: widget.productData['price'].toString());
+    stockController = TextEditingController(text: widget.productData['stock'].toString());
+    descController = TextEditingController(text: widget.productData['description']);
+  }
+
+  void _updateProduct() async {
+    if (nameController.text.isEmpty || priceController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Name and Price are required!')));
+      return;
+    }
+
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+      // আপনার লজিক অনুযায়ী: আপডেট করলে স্ট্যাটাস আবার 'pending' হয়ে যাবে
+      await FirebaseFirestore.instance.collection('products').doc(widget.productId).update({
+        'product_name': nameController.text.trim(),
+        'price': priceController.text.trim(),
+        'stock': stockController.text.trim(),
+        'description': descController.text.trim(),
+        'status': 'pending', // <--- Magic Line: Re-approval required
+        'updated_at': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      Navigator.pop(context); // Close loading
+      Navigator.pop(context); // Go back to management page
+      
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product updated! It is now pending for admin approval.')));
+    } catch (e) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(title: const Text('Edit Product'), backgroundColor: Colors.amber[400], foregroundColor: Colors.black),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children:[
+            Container(
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red.shade200)),
+              child: Row(
+                children: const[
+                  Icon(Icons.warning_amber_rounded, color: Colors.red),
+                  SizedBox(width: 10),
+                  Expanded(child: Text('Note: Updating product details will change its status back to PENDING. Admin will need to re-approve it.', style: TextStyle(color: Colors.red, fontSize: 12))),
+                ],
+              ),
+            ),
+            const SizedBox(height: 25),
+            
+            TextField(
+              controller: nameController, 
+              decoration: const InputDecoration(labelText: 'Product Name', border: OutlineInputBorder())
+            ),
+            const SizedBox(height: 15),
+            
+            Row(
+              children:[
+                Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Price (৳)', border: OutlineInputBorder()))),
+                const SizedBox(width: 10),
+                Expanded(child: TextField(controller: stockController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Stock Qty', border: OutlineInputBorder()))),
+              ],
+            ),
+            const SizedBox(height: 15),
+            
+            TextField(
+              controller: descController, 
+              maxLines: 4, 
+              decoration: const InputDecoration(labelText: 'Description', border: OutlineInputBorder())
+            ),
+            const SizedBox(height: 40),
+            
+            SizedBox(
+              width: double.infinity, height: 50,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                onPressed: _updateProduct, 
+                child: const Text('UPDATE & REQUEST APPROVAL', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+              ),
+            )
+          ],
+        ),
       ),
     );
   }
 }
 
 // ==========================================
-// সেলার পেমেন্ট ও রিপোর্টস 
+// সেলার অর্ডার ম্যানেজমেন্ট (Smart Fulfillment & Tracking)
 // ==========================================
-class PaymentsReports extends StatelessWidget {
-  const PaymentsReports({super.key});
-  @override Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(backgroundColor: Colors.amber[200], title: const Text('PAYMENTS & REPORTS', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold))),
-      body: SingleChildScrollView(padding: const EdgeInsets.all(15), child: Column(children: [Row(children:[_buildBalanceCard("Available Balance", "৳২৫,০০০"), const SizedBox(width: 15), _buildBalanceCard("Pending Payout", "৳৮,৫০০")]), const SizedBox(height: 25), const Text('Sales Report', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 15), Container(height: 200, width: double.infinity, color: Colors.grey[100], child: const Center(child: Text('Chart Placeholder'))), const SizedBox(height: 25), ListTile(tileColor: Colors.white, leading: const Icon(Icons.account_balance), title: const Text('Link a Bank Account'), trailing: const Icon(Icons.arrow_forward_ios, size: 15)), const SizedBox(height: 10), ListTile(tileColor: Colors.white, leading: const Icon(Icons.account_balance_wallet, color: Colors.pink), title: const Text('Add bKash'), trailing: const Icon(Icons.arrow_forward_ios, size: 15))])),
+class SellerOrderManagement extends StatelessWidget {
+  const SellerOrderManagement({super.key});
+
+  // কাস্টমারকে অটোমেটিক নোটিফিকেশন পাঠানোর ফাংশন
+  Future<void> _sendCustomerNotification(String userId, String orderId, String statusMsg) async {
+    await FirebaseFirestore.instance.collection('notifications').add({
+      'target_user_id': userId,
+      'title': 'Order Update 📦',
+      'message': 'Your order #${orderId.substring(0, 8).toUpperCase()} is $statusMsg.',
+      'sent_at': FieldValue.serverTimestamp(),
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+
+    return DefaultTabController(
+      length: 4,
+      child: Scaffold(
+        backgroundColor: Colors.grey.shade100,
+        appBar: AppBar(
+          backgroundColor: Colors.amber[200], 
+          title: const Text('ORDER MANAGEMENT', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), 
+          bottom: const TabBar(
+            isScrollable: true, 
+            labelColor: Colors.black, 
+            indicatorColor: Colors.deepOrange, 
+            tabs:[
+              Tab(text: 'New (Pending)'), 
+              Tab(text: 'To Pack (Processing)'), 
+              Tab(text: 'Handed Over (Shipped)'), 
+              Tab(text: 'Completed')
+            ]
+          )
+        ),
+        body: StreamBuilder<QuerySnapshot>(
+          stream: FirebaseFirestore.instance.collection('orders').orderBy('order_date', descending: true).snapshots(),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+            if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('You have no orders yet.'));
+
+            // শুধুমাত্র এই সেলারের আইটেম আছে এমন অর্ডারগুলো ফিল্টার করা হচ্ছে
+            var sellerOrders = snapshot.data!.docs.where((doc) {
+              var data = doc.data() as Map<String, dynamic>;
+              List<dynamic> items = data['items'] ??[];
+              // যদি অর্ডারের কোনো একটি আইটেম এই সেলারের হয়, তবেই সে দেখতে পাবে
+              return items.any((item) => item['seller_id'] == currentUser?.uid);
+            }).toList();
+
+            if (sellerOrders.isEmpty) return const Center(child: Text('You have no orders yet.', style: TextStyle(color: Colors.grey)));
+
+            // ট্যাব অনুযায়ী ফিল্টার
+            var pendingOrders = sellerOrders.where((doc) => doc['status'] == 'Pending').toList();
+            var processingOrders = sellerOrders.where((doc) => doc['status'] == 'Processing' || doc['status'] == 'Ready to Ship').toList();
+            var shippedOrders = sellerOrders.where((doc) => doc['status'] == 'Dispatched').toList();
+            var completedOrders = sellerOrders.where((doc) => doc['status'] == 'Delivered' || doc['status'] == 'Cancelled').toList();
+
+            return TabBarView(
+              children:[
+                _buildOrderList(context, pendingOrders, currentUser!.uid),
+                _buildOrderList(context, processingOrders, currentUser.uid),
+                _buildOrderList(context, shippedOrders, currentUser.uid),
+                _buildOrderList(context, completedOrders, currentUser.uid),
+              ],
+            );
+          }
+        ),
+      ),
     );
   }
-  Widget _buildBalanceCard(String title, String amount) {return Expanded(child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.amber[50], borderRadius: BorderRadius.circular(15)), child: Column(children:[Text(title, style: const TextStyle(fontSize: 12)), Text(amount, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))]))); }
+
+  // অর্ডার লিস্ট উইজেট
+  Widget _buildOrderList(BuildContext context, List<QueryDocumentSnapshot> orders, String sellerId) {
+    if (orders.isEmpty) return const Center(child: Text('No orders in this section.', style: TextStyle(color: Colors.grey)));
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(15), 
+      itemCount: orders.length, 
+      itemBuilder: (context, index) {
+        var doc = orders[index];
+        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+        
+        // শুধুমাত্র এই সেলারের আইটেমগুলোর দাম হিসাব করা
+        List<dynamic> allItems = data['items'] ??[];
+        List<dynamic> myItems = allItems.where((i) => i['seller_id'] == sellerId).toList();
+        
+        double myTotalValue = 0;
+        String itemNames = '';
+        for (var item in myItems) {
+          myTotalValue += (double.tryParse(item['price'].toString()) ?? 0) * (int.tryParse(item['quantity'].toString()) ?? 1);
+          itemNames += '${item['quantity']}x ${item['product_name']}\n';
+        }
+
+        String status = data['status'] ?? 'Pending';
+        String customerId = data['user_id'] ?? '';
+        
+        // স্ট্যাটাস অনুযায়ী কালার
+        Color statusColor = Colors.orange;
+        if (status == 'Processing' || status == 'Ready to Ship') statusColor = Colors.blue;
+        else if (status == 'Dispatched') statusColor = Colors.purple;
+        else if (status == 'Delivered') statusColor = Colors.green;
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 15), 
+          padding: const EdgeInsets.all(15), 
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade300)), 
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, 
+            children:[
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+                children:[
+                  Text('Order ID: ${doc.id.substring(0, 8).toUpperCase()}', style: const TextStyle(fontWeight: FontWeight.bold)), 
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3), 
+                    decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), 
+                    child: Text(status, style: TextStyle(fontSize: 12, color: statusColor, fontWeight: FontWeight.bold))
+                  )
+                ]
+              ), 
+              const SizedBox(height: 5),
+              Text('Customer: ${data['shipping_name'] ?? 'Unknown'}', style: const TextStyle(color: Colors.grey, fontSize: 13)), 
+              const Divider(height: 20), 
+              
+              Text(itemNames.trim(), style: const TextStyle(fontSize: 13, color: Colors.black87), maxLines: 2, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 10),
+
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+                children:[
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children:[
+                      const Text('Your Earnings', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      Text('৳${myTotalValue.toStringAsFixed(0)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                    ],
+                  ), 
+                  
+                  // =====================================
+                  // ডাইনামিক অ্যাকশন বাটন (Shopee/Daraz Style)
+                  // =====================================
+                  _buildSellerActionButton(context, doc.id, customerId, status)
+                ]
+              ),
+
+              const SizedBox(height: 15),
+              // =====================================
+              // লাইভ ট্র্যাকিং বার (যেটা আপনি লাল বক্সে চাচ্ছিলেন)
+              // =====================================
+              _buildTrackingTimeline(status),
+            ]
+          )
+        );
+      }
+    );
+  }
+
+  // সেলারের কাজের বাটন
+  Widget _buildSellerActionButton(BuildContext context, String orderId, String customerId, String status) {
+    if (status == 'Pending') {
+      return ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+        onPressed: () async {
+          // ১. স্ট্যাটাস প্রসেসিং (প্যাকেজিং) করা
+          await FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Processing'});
+          // ২. কাস্টমারকে নোটিফিকেশন পাঠানো
+          await _sendCustomerNotification(customerId, orderId, 'being prepared by the seller');
+        }, 
+        icon: const Icon(Icons.inventory_2, color: Colors.white, size: 16),
+        label: const Text('Accept & Pack', style: TextStyle(color: Colors.white))
+      );
+    } 
+    else if (status == 'Processing') {
+      return ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+        onPressed: () async {
+          // ১. রেডি টু শিপ করা
+          await FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Ready to Ship'});
+          // ২. কাস্টমারকে নোটিফিকেশন পাঠানো
+          await _sendCustomerNotification(customerId, orderId, 'packed and waiting for rider pickup');
+        }, 
+        icon: const Icon(Icons.check_circle, color: Colors.white, size: 16),
+        label: const Text('Ready to Ship', style: TextStyle(color: Colors.white))
+      );
+    }
+    else if (status == 'Ready to Ship') {
+      return OutlinedButton.icon(
+        onPressed: null, 
+        icon: const Icon(Icons.hourglass_empty, size: 16),
+        label: const Text('Waiting for Rider')
+      );
+    }
+    else if (status == 'Dispatched') {
+      return const Text('Handed Over 🚚', style: TextStyle(color: Colors.purple, fontWeight: FontWeight.bold));
+    }
+    else if (status == 'Delivered') {
+      return const Text('Payment Done ✅', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold));
+    }
+    return const SizedBox();
+  }
+
+  // ট্র্যাকিং টাইমলাইন (Visual Step Bar)
+  Widget _buildTrackingTimeline(String currentStatus) {
+    int step = 0;
+    if (currentStatus == 'Pending') step = 0;
+    else if (currentStatus == 'Processing') step = 1;
+    else if (currentStatus == 'Ready to Ship') step = 2;
+    else if (currentStatus == 'Dispatched') step = 3;
+    else if (currentStatus == 'Delivered') step = 4;
+
+    return Row(
+      children:[
+        _buildTimelineStep('Pack', step >= 1, isFirst: true),
+        _buildTimelineLine(step >= 2),
+        _buildTimelineStep('RTS', step >= 2),
+        _buildTimelineLine(step >= 3),
+        _buildTimelineStep('Shipped', step >= 3),
+        _buildTimelineLine(step >= 4),
+        _buildTimelineStep('Done', step >= 4, isLast: true),
+      ],
+    );
+  }
+
+  // টাইমলাইনের গোল আইকন বা টেক্সট
+  Widget _buildTimelineStep(String label, bool isCompleted, {bool isFirst = false, bool isLast = false}) {
+    return Column(
+      children:[
+        Container(
+          width: 20, height: 20,
+          decoration: BoxDecoration(
+            color: isCompleted ? Colors.teal : Colors.grey.shade300,
+            shape: BoxShape.circle,
+          ),
+          child: isCompleted ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
+        ),
+        const SizedBox(height: 4),
+        Text(label, style: TextStyle(fontSize: 9, color: isCompleted ? Colors.teal : Colors.grey, fontWeight: FontWeight.bold))
+      ],
+    );
+  }
+
+  // টাইমলাইনের মাঝখানের দাগ
+  Widget _buildTimelineLine(bool isCompleted) {
+    return Expanded(
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 15),
+        height: 3,
+        color: isCompleted ? Colors.teal : Colors.grey.shade200,
+      ),
+    );
+  }
 }
 
 // ==========================================
-// সেলার প্রোফাইল (Profile Picture Upload + Switch Modes)
+// সেলার পেমেন্ট ও রিপোর্টস (Real-time Earnings & Withdrawal)
+// ==========================================
+class PaymentsReports extends StatefulWidget {
+  const PaymentsReports({super.key});
+
+  @override
+  State<PaymentsReports> createState() => _PaymentsReportsState();
+}
+
+class _PaymentsReportsState extends State<PaymentsReports> {
+  double platformCommissionRate = 0.10; // ডিফল্ট ১০% কমিশন
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchCommissionRate();
+  }
+
+  // অ্যাডমিন প্যানেল থেকে সেট করা রিয়েল কমিশন রেট আনা
+  Future<void> _fetchCommissionRate() async {
+    try {
+      var doc = await FirebaseFirestore.instance.collection('app_config').doc('finance_settings').get();
+      if (doc.exists) {
+        setState(() {
+          platformCommissionRate = ((doc.data()?['platform_commission'] ?? 10) as num).toDouble() / 100;
+        });
+      }
+    } catch (e) {}
+  }
+
+  // টাকা তোলার রিকোয়েস্ট পাঠানোর পপ-আপ
+  void _requestWithdrawal(double availableBalance) {
+    if (availableBalance <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('পর্যাপ্ত ব্যালেন্স নেই!')));
+      return;
+    }
+
+    TextEditingController amountCtrl = TextEditingController(text: availableBalance.toStringAsFixed(0));
+    String selectedMethod = 'bKash';
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Withdraw Funds'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                Text('Available: ৳${availableBalance.toStringAsFixed(0)}', style: const TextStyle(color: Colors.teal, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 15),
+                TextField(
+                  controller: amountCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Amount to withdraw (৳)', border: OutlineInputBorder(), isDense: true),
+                ),
+                const SizedBox(height: 15),
+                DropdownButtonFormField<String>(
+                  value: selectedMethod,
+                  decoration: const InputDecoration(labelText: 'Transfer to', border: OutlineInputBorder(), isDense: true),
+                  items: ['bKash', 'Nagad', 'Bank Account'].map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
+                  onChanged: (val) => setDialogState(() => selectedMethod = val!),
+                )
+              ],
+            ),
+            actions:[
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                onPressed: () {
+                  // এখানে ফায়ারবেসে একটি 'payout_requests' কালেকশন তৈরি করা যেতে পারে
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Withdrawal request of ৳${amountCtrl.text} via $selectedMethod sent to Admin!')));
+                },
+                child: const Text('Confirm', style: TextStyle(color: Colors.white)),
+              )
+            ],
+          );
+        }
+      )
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+
+    return Scaffold(
+      backgroundColor: Colors.grey.shade50,
+      appBar: AppBar(
+        backgroundColor: Colors.amber[200], 
+        title: const Text('PAYMENTS & REPORTS', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold))
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance.collection('orders').snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('No sales data yet.'));
+
+          double availableBalance = 0;
+          double pendingBalance = 0;
+          List<Map<String, dynamic>> earningHistory =[];
+
+          // সেলারের আর্নিং হিসাব করা
+          for (var doc in snapshot.data!.docs) {
+            Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+            List<dynamic> items = data['items'] ??[];
+            String status = data['status'] ?? 'Pending';
+
+            for (var item in items) {
+              if (item['seller_id'] == currentUser?.uid) {
+                double price = double.tryParse(item['price'].toString()) ?? 0;
+                int qty = int.tryParse(item['quantity'].toString()) ?? 1;
+                
+                // সেলারের নিট লাভ (অ্যাডমিন কমিশন বাদে)
+                double netEarnings = (price * qty) * (1 - platformCommissionRate);
+
+                if (status == 'Delivered') {
+                  availableBalance += netEarnings;
+                  // হিস্ট্রিতে অ্যাড করা
+                  earningHistory.add({
+                    'product_name': item['product_name'],
+                    'earnings': netEarnings,
+                    'date': data['order_date'] ?? FieldValue.serverTimestamp(),
+                    'status': 'Completed'
+                  });
+                } 
+                else if (status != 'Cancelled') {
+                  pendingBalance += netEarnings;
+                  // হিস্ট্রিতে অ্যাড করা
+                  earningHistory.add({
+                    'product_name': item['product_name'],
+                    'earnings': netEarnings,
+                    'date': data['order_date'] ?? FieldValue.serverTimestamp(),
+                    'status': 'Pending'
+                  });
+                }
+              }
+            }
+          }
+
+          // লেটেস্ট হিস্ট্রি আগে দেখানোর জন্য সর্ট করা
+          earningHistory.sort((a, b) {
+            Timestamp? tA = a['date'] as Timestamp?;
+            Timestamp? tB = b['date'] as Timestamp?;
+            if (tA == null || tB == null) return 0;
+            return tB.compareTo(tA);
+          });
+
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(15), 
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                // =====================================
+                // Balance Cards
+                // =====================================
+                Row(
+                  children:[
+                    _buildBalanceCard("Available Balance", "৳${availableBalance.toStringAsFixed(0)}", Colors.teal), 
+                    const SizedBox(width: 15), 
+                    _buildBalanceCard("Pending Payout", "৳${pendingBalance.toStringAsFixed(0)}", Colors.orange)
+                  ]
+                ), 
+                const SizedBox(height: 15),
+
+                // উইথড্র বাটন
+                SizedBox(
+                  width: double.infinity, height: 50,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                    onPressed: () => _requestWithdrawal(availableBalance), 
+                    icon: const Icon(Icons.account_balance_wallet, color: Colors.white), 
+                    label: const Text('WITHDRAW FUNDS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                  ),
+                ),
+                const SizedBox(height: 25), 
+                
+                // =====================================
+                // Payment Methods
+                // =====================================
+                const Text('Payment Methods', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), 
+                const SizedBox(height: 10), 
+                Card(
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  child: Column(
+                    children:[
+                      ListTile(leading: const Icon(Icons.account_balance, color: Colors.blue), title: const Text('Link a Bank Account'), trailing: const Icon(Icons.arrow_forward_ios, size: 15), onTap: (){}), 
+                      const Divider(height: 1),
+                      ListTile(leading: const Icon(Icons.account_balance_wallet, color: Colors.pink), title: const Text('Add bKash Number'), subtitle: const Text('017XXXXXXXX', style: TextStyle(color: Colors.grey)), trailing: const Icon(Icons.edit, size: 15, color: Colors.teal), onTap: (){}), 
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 25), 
+
+                // =====================================
+                // Earning History (Sales Report)
+                // =====================================
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children:[
+                    const Text('Recent Earnings', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    Text('${(platformCommissionRate * 100).toStringAsFixed(0)}% Platform Fee Deducted', style: const TextStyle(fontSize: 10, color: Colors.redAccent)),
+                  ],
+                ),
+                const SizedBox(height: 10), 
+
+                if (earningHistory.isEmpty)
+                  const Center(child: Padding(padding: EdgeInsets.all(20.0), child: Text('No earning history yet.', style: TextStyle(color: Colors.grey))))
+                else
+                  ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: earningHistory.length,
+                    itemBuilder: (context, index) {
+                      var item = earningHistory[index];
+                      bool isCompleted = item['status'] == 'Completed';
+
+                      // Date formatting
+                      String dateStr = 'Recently';
+                      if (item['date'] is Timestamp) {
+                        DateTime dt = (item['date'] as Timestamp).toDate();
+                        dateStr = '${dt.day}/${dt.month}/${dt.year}';
+                      }
+
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: isCompleted ? Colors.green.shade50 : Colors.orange.shade50,
+                            child: Icon(isCompleted ? Icons.done_all : Icons.hourglass_empty, color: isCompleted ? Colors.green : Colors.orange, size: 20),
+                          ),
+                          title: Text(item['product_name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13), maxLines: 1, overflow: TextOverflow.ellipsis),
+                          subtitle: Text(dateStr, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                          trailing: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children:[
+                              Text('+ ৳${item['earnings'].toStringAsFixed(0)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: isCompleted ? Colors.teal : Colors.grey)),
+                              Text(item['status'], style: TextStyle(fontSize: 10, color: isCompleted ? Colors.green : Colors.orange)),
+                            ],
+                          ),
+                        ),
+                      );
+                    }
+                  )
+              ]
+            ),
+          );
+        }
+      ),
+    );
+  }
+
+  // ব্যালেন্স কার্ডের হেল্পার উইজেট
+  Widget _buildBalanceCard(String title, String amount, Color color) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(15), 
+        decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(15), border: Border.all(color: color.withOpacity(0.3))), 
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children:[
+            Text(title, style: TextStyle(fontSize: 12, color: Colors.grey.shade800, fontWeight: FontWeight.bold)), 
+            const SizedBox(height: 5),
+            Text(amount, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: color))
+          ]
+        )
+      )
+    ); 
+  }
+}
+
+// ==========================================
+// সেলার প্রোফাইল (Profile Picture Upload, Shop Settings & Payment Info)
 // ==========================================
 class SellerProfile extends StatefulWidget {
   const SellerProfile({super.key});
@@ -2690,7 +3594,6 @@ class SellerProfile extends StatefulWidget {
 class _SellerProfileState extends State<SellerProfile> {
   final ImagePicker _picker = ImagePicker();
 
-  // ছবি আপলোডের ফাংশন
   Future<void> _uploadSellerProfilePicture() async {
     User? currentUser = FirebaseAuth.instance.currentUser;
     final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
@@ -2711,17 +3614,14 @@ class _SellerProfileState extends State<SellerProfile> {
       
       String downloadUrl = await ref.getDownloadURL();
       
-      // ফায়ারবেসে সেভ করা হচ্ছে
       await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({'profile_image_url': downloadUrl});
 
-      // লোকাল ক্যাশে আপডেট রাখা
       SharedPreferences prefs = await SharedPreferences.getInstance();
       prefs.setString('profile_image', downloadUrl);
 
       if (!mounted) return;
       Navigator.pop(context); 
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দোকানের লোগো সফলভাবে আপডেট হয়েছে! 🎉')));
-      // StreamBuilder অটোমেটিক ছবি আপডেট করে নিবে
     } catch (e) {
       if (!mounted) return;
       Navigator.pop(context);
@@ -2736,7 +3636,6 @@ class _SellerProfileState extends State<SellerProfile> {
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
       appBar: AppBar(backgroundColor: Colors.orange[100], elevation: 0),
-      // FutureBuilder এর বদলে StreamBuilder দেওয়া হয়েছে যাতে ছবি আপলোড করলেই সাথে সাথে চেঞ্জ হয়
       body: StreamBuilder<DocumentSnapshot>(
         stream: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).snapshots(),
         builder: (context, snapshot) {
@@ -2752,9 +3651,6 @@ class _SellerProfileState extends State<SellerProfile> {
                 decoration: BoxDecoration(color: Colors.orange[100], borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(30), bottomRight: Radius.circular(30))), 
                 child: Column(
                   children:[
-                    // ==============================
-                    // ক্লিকেবল প্রোফাইল ছবি
-                    // ==============================
                     Stack(
                       alignment: Alignment.bottomRight,
                       children:[
@@ -2783,7 +3679,6 @@ class _SellerProfileState extends State<SellerProfile> {
                 child: ListView(
                   padding: const EdgeInsets.all(20), 
                   children:[
-                    // কাস্টমাররা দোকান কেমন দেখছে সেটা দেখার বাটন
                     ListTile(
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       tileColor: Colors.white,
@@ -2797,7 +3692,6 @@ class _SellerProfileState extends State<SellerProfile> {
                       },
                     ),
                     const SizedBox(height: 10),
-                    // সাধারণ কাস্টমার হিসেবে কেনাকাটা করার বাটন
                     ListTile(
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       tileColor: Colors.white,
@@ -2811,8 +3705,16 @@ class _SellerProfileState extends State<SellerProfile> {
                     ),
                     const SizedBox(height: 25),
                     
-                    _buildProfileItem(Icons.settings, "Shop Settings"), 
-                    _buildProfileItem(Icons.account_balance, "Bank / Payment Info"), 
+                    // ==========================================
+                    // ক্লিকেবল Shop Settings & Payment Info
+                    // ==========================================
+                    _buildProfileItem(Icons.settings, "Shop Settings", () {
+                      Navigator.push(context, MaterialPageRoute(builder: (context) => const SellerShopSettingsPage()));
+                    }), 
+                    _buildProfileItem(Icons.account_balance, "Bank / Payment Info", () {
+                      Navigator.push(context, MaterialPageRoute(builder: (context) => const SellerPaymentInfoPage()));
+                    }), 
+                    
                     const SizedBox(height: 30), 
                     
                     TextButton.icon(
@@ -2821,7 +3723,7 @@ class _SellerProfileState extends State<SellerProfile> {
                         SharedPreferences prefs = await SharedPreferences.getInstance();
                         await prefs.clear();
                         await FirebaseAuth.instance.signOut(); 
-                        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                        if(context.mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
                       }, 
                       label: const Text('Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 18))
                     )
@@ -2834,7 +3736,232 @@ class _SellerProfileState extends State<SellerProfile> {
       ),
     );
   }
-  Widget _buildProfileItem(IconData icon, String title) {return ListTile(leading: Icon(icon, color: Colors.grey.shade700), title: Text(title), trailing: const Icon(Icons.arrow_forward_ios, size: 15));}
+  Widget _buildProfileItem(IconData icon, String title, VoidCallback onTap) {
+    return Card(
+      elevation: 0, color: Colors.white, margin: const EdgeInsets.only(bottom: 5),
+      child: ListTile(
+        leading: Icon(icon, color: Colors.grey.shade700), 
+        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)), 
+        trailing: const Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey),
+        onTap: onTap,
+      ),
+    );
+  }
+}
+
+// ==========================================
+// নতুন পেজ ১: Seller Shop Settings (দোকানের ঠিকানা ও কন্টাক্ট)
+// ==========================================
+class SellerShopSettingsPage extends StatefulWidget {
+  const SellerShopSettingsPage({super.key});
+
+  @override
+  State<SellerShopSettingsPage> createState() => _SellerShopSettingsPageState();
+}
+
+class _SellerShopSettingsPageState extends State<SellerShopSettingsPage> {
+  final TextEditingController shopNameCtrl = TextEditingController();
+  final TextEditingController phoneCtrl = TextEditingController();
+  final TextEditingController addressCtrl = TextEditingController();
+  final TextEditingController descCtrl = TextEditingController();
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadShopData();
+  }
+
+  Future<void> _loadShopData() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      var doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      if (doc.exists) {
+        var data = doc.data() as Map<String, dynamic>;
+        shopNameCtrl.text = data['shop_name'] ?? data['name'] ?? '';
+        phoneCtrl.text = data['phone'] ?? '';
+        addressCtrl.text = data['shop_address'] ?? ''; // পিক আপ এড্রেস
+        descCtrl.text = data['shop_description'] ?? '';
+      }
+    }
+    setState(() => isLoading = false);
+  }
+
+  Future<void> _saveShopData() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    
+    setState(() => isLoading = true);
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+        'shop_name': shopNameCtrl.text.trim(),
+        'phone': phoneCtrl.text.trim(),
+        'shop_address': addressCtrl.text.trim(),
+        'shop_description': descCtrl.text.trim(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Shop details saved successfully! ✅')));
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+    setState(() => isLoading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(title: const Text('Shop Settings'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
+      body: isLoading 
+        ? const Center(child: CircularProgressIndicator())
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                const Text('Basic Shop Info', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 5),
+                const Text('রাইডার পার্সেল পিক করার জন্য এই ঠিকানায় যোগাযোগ করবে।', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                const SizedBox(height: 25),
+                
+                TextField(controller: shopNameCtrl, decoration: const InputDecoration(labelText: 'Shop Name', prefixIcon: Icon(Icons.store), border: OutlineInputBorder())),
+                const SizedBox(height: 15),
+                TextField(controller: phoneCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Contact Phone Number', prefixIcon: Icon(Icons.phone), border: OutlineInputBorder())),
+                const SizedBox(height: 15),
+                TextField(controller: addressCtrl, maxLines: 3, decoration: const InputDecoration(labelText: 'Pick-up Address (Details)', prefixIcon: Icon(Icons.location_on), border: OutlineInputBorder(), hintText: 'House/Shop No, Street, Area, City')),
+                const SizedBox(height: 15),
+                TextField(controller: descCtrl, maxLines: 3, decoration: const InputDecoration(labelText: 'Shop Description (Optional)', prefixIcon: Icon(Icons.description), border: OutlineInputBorder())),
+                
+                const SizedBox(height: 30),
+                SizedBox(
+                  width: double.infinity, height: 50,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                    onPressed: _saveShopData, 
+                    icon: const Icon(Icons.save, color: Colors.white),
+                    label: const Text('SAVE SETTINGS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                  )
+                )
+              ],
+            ),
+          )
+    );
+  }
+}
+
+// ==========================================
+// নতুন পেজ ২: Seller Payment Info (বিকাশ/ব্যাংক ডিটেইলস)
+// ==========================================
+class SellerPaymentInfoPage extends StatefulWidget {
+  const SellerPaymentInfoPage({super.key});
+
+  @override
+  State<SellerPaymentInfoPage> createState() => _SellerPaymentInfoPageState();
+}
+
+class _SellerPaymentInfoPageState extends State<SellerPaymentInfoPage> {
+  final TextEditingController bkashCtrl = TextEditingController();
+  final TextEditingController nagadCtrl = TextEditingController();
+  final TextEditingController accNameCtrl = TextEditingController();
+  final TextEditingController accNoCtrl = TextEditingController();
+  final TextEditingController bankNameCtrl = TextEditingController();
+  final TextEditingController branchCtrl = TextEditingController();
+  
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPaymentData();
+  }
+
+  Future<void> _loadPaymentData() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      var doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      if (doc.exists) {
+        var data = doc.data() as Map<String, dynamic>;
+        bkashCtrl.text = data['bkash_number'] ?? '';
+        nagadCtrl.text = data['nagad_number'] ?? '';
+        accNameCtrl.text = data['bank_account_name'] ?? '';
+        accNoCtrl.text = data['bank_account_no'] ?? '';
+        bankNameCtrl.text = data['bank_name'] ?? '';
+        branchCtrl.text = data['bank_branch'] ?? '';
+      }
+    }
+    setState(() => isLoading = false);
+  }
+
+  Future<void> _savePaymentData() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    
+    setState(() => isLoading = true);
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+        'bkash_number': bkashCtrl.text.trim(),
+        'nagad_number': nagadCtrl.text.trim(),
+        'bank_account_name': accNameCtrl.text.trim(),
+        'bank_account_no': accNoCtrl.text.trim(),
+        'bank_name': bankNameCtrl.text.trim(),
+        'bank_branch': branchCtrl.text.trim(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment info saved successfully! 💳')));
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+    setState(() => isLoading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(title: const Text('Bank / Payment Info'), backgroundColor: Colors.pink, foregroundColor: Colors.white),
+      body: isLoading 
+        ? const Center(child: CircularProgressIndicator())
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                const Text('Mobile Banking (MFS)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.pink)),
+                const SizedBox(height: 10),
+                TextField(controller: bkashCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'bKash Number (Personal/Agent)', prefixIcon: Icon(Icons.phone_android, color: Colors.pink), border: OutlineInputBorder())),
+                const SizedBox(height: 10),
+                TextField(controller: nagadCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Nagad Number', prefixIcon: Icon(Icons.phone_android, color: Colors.orange), border: OutlineInputBorder())),
+                
+                const SizedBox(height: 30),
+                const Text('Bank Account Details', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blue)),
+                const SizedBox(height: 10),
+                TextField(controller: bankNameCtrl, decoration: const InputDecoration(labelText: 'Bank Name (e.g. DBBL, Islami Bank)', prefixIcon: Icon(Icons.account_balance, color: Colors.blue), border: OutlineInputBorder())),
+                const SizedBox(height: 10),
+                TextField(controller: accNameCtrl, decoration: const InputDecoration(labelText: 'Account Holder Name', prefixIcon: Icon(Icons.person), border: OutlineInputBorder())),
+                const SizedBox(height: 10),
+                TextField(controller: accNoCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Account Number', prefixIcon: Icon(Icons.numbers), border: OutlineInputBorder())),
+                const SizedBox(height: 10),
+                TextField(controller: branchCtrl, decoration: const InputDecoration(labelText: 'Branch Name', prefixIcon: Icon(Icons.business), border: OutlineInputBorder())),
+                
+                const SizedBox(height: 30),
+                SizedBox(
+                  width: double.infinity, height: 50,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                    onPressed: _savePaymentData, 
+                    icon: const Icon(Icons.save, color: Colors.white),
+                    label: const Text('SAVE PAYMENT INFO', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                  )
+                )
+              ],
+            ),
+          )
+    );
+  }
 }
 
 // ==========================================
@@ -4557,7 +5684,7 @@ class AdminFinanceReports extends StatelessWidget {
 }
 
 // ==========================================
-// অ্যাডমিন পেজ ৫: System Settings & Admin (Functional Setup)
+// অ্যাডমিন পেজ ৫: System Settings & Admin (Super Admin & Staff Logic)
 // ==========================================
 class AdminSettings extends StatefulWidget {
   const AdminSettings({super.key});
@@ -4569,7 +5696,18 @@ class AdminSettings extends StatefulWidget {
 class _AdminSettingsState extends State<AdminSettings> {
   final ImagePicker _picker = ImagePicker();
 
-  // অ্যাডমিন প্রোফাইল ছবি আপলোড করার ফাংশন
+  Future<void> _logAdminAction(String action, String details) async {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+    
+    await FirebaseFirestore.instance.collection('security_logs').add({
+      'admin_email': currentUser.email ?? 'Unknown Admin',
+      'action': action,
+      'details': details,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+  }
+
   Future<void> _uploadAdminProfilePicture() async {
     User? currentUser = FirebaseAuth.instance.currentUser;
     final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
@@ -4590,8 +5728,8 @@ class _AdminSettingsState extends State<AdminSettings> {
       
       String downloadUrl = await ref.getDownloadURL();
       
-      // ফায়ারবেসে সেভ
       await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({'profile_image_url': downloadUrl});
+      await _logAdminAction('Profile Update', 'Admin updated their profile picture.');
 
       if (!mounted) return;
       Navigator.pop(context); 
@@ -4603,15 +5741,11 @@ class _AdminSettingsState extends State<AdminSettings> {
     }
   }
 
-  // অ্যাপ কনফিগ (Platform Commission) আপডেট করার পপ-আপ
   void _showAppConfigDialog() {
     TextEditingController commissionCtrl = TextEditingController();
     
-    // ফায়ারবেস থেকে আগের কমিশন ডাটা নিয়ে আসা
     FirebaseFirestore.instance.collection('app_config').doc('finance_settings').get().then((doc) {
-      if (doc.exists) {
-        commissionCtrl.text = (doc['platform_commission'] ?? 10).toString();
-      }
+      if (doc.exists) commissionCtrl.text = (doc['platform_commission'] ?? 10).toString();
     });
 
     showDialog(
@@ -4624,11 +5758,7 @@ class _AdminSettingsState extends State<AdminSettings> {
           children:[
             const Text('Set Platform Commission (%)', style: TextStyle(fontSize: 12, color: Colors.grey)),
             const SizedBox(height: 5),
-            TextField(
-              controller: commissionCtrl, 
-              keyboardType: TextInputType.number, 
-              decoration: const InputDecoration(hintText: 'e.g. 10', border: OutlineInputBorder(), isDense: true)
-            ),
+            TextField(controller: commissionCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(hintText: 'e.g. 10', border: OutlineInputBorder(), isDense: true)),
             const SizedBox(height: 10),
             const Text('*This % will be deducted from seller payouts.', style: TextStyle(fontSize: 10, color: Colors.deepOrange)),
           ],
@@ -4638,9 +5768,13 @@ class _AdminSettingsState extends State<AdminSettings> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
             onPressed: () async {
+              String newVal = commissionCtrl.text.trim();
               await FirebaseFirestore.instance.collection('app_config').doc('finance_settings').set({
-                'platform_commission': double.tryParse(commissionCtrl.text) ?? 10.0,
+                'platform_commission': double.tryParse(newVal) ?? 10.0,
               }, SetOptions(merge: true));
+              
+              await _logAdminAction('Commission Update', 'Platform commission changed to $newVal%');
+
               if(mounted) Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Commission Rate Updated Successfully!')));
             }, 
@@ -4651,10 +5785,9 @@ class _AdminSettingsState extends State<AdminSettings> {
     );
   }
 
-  // রোল ম্যানেজমেন্ট পপ-আপ (যেকোনো ইউজারকে অ্যাডমিন/সেলার বানানোর অপশন)
   void _showRoleManagementDialog() {
     TextEditingController emailCtrl = TextEditingController();
-    String selectedRole = 'admin';
+    String selectedRole = 'admin'; // 'admin' মানে স্টাফ
 
     showDialog(
       context: context,
@@ -4665,15 +5798,13 @@ class _AdminSettingsState extends State<AdminSettings> {
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children:[
-                TextField(
-                  controller: emailCtrl, 
-                  decoration: const InputDecoration(labelText: 'User Email Address', border: OutlineInputBorder(), isDense: true)
-                ),
+                TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: 'User Email Address', border: OutlineInputBorder(), isDense: true)),
                 const SizedBox(height: 15),
                 DropdownButtonFormField<String>(
                   value: selectedRole,
                   decoration: const InputDecoration(labelText: 'Assign New Role', border: OutlineInputBorder(), isDense: true),
-                  items: ['admin', 'seller', 'rider', 'customer'].map((r) => DropdownMenuItem(value: r, child: Text(r.toUpperCase()))).toList(),
+                  // এখন সুপার অ্যাডমিন স্টাফ বানাতে পারবে
+                  items:['super_admin', 'admin', 'seller', 'rider', 'customer'].map((r) => DropdownMenuItem(value: r, child: Text(r.toUpperCase()))).toList(),
                   onChanged: (val) => setDialogState(() => selectedRole = val!),
                 )
               ],
@@ -4684,11 +5815,13 @@ class _AdminSettingsState extends State<AdminSettings> {
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
                 onPressed: () async {
                   if(emailCtrl.text.isEmpty) return;
+                  String targetEmail = emailCtrl.text.trim();
                   
-                  // ইমেইল দিয়ে ইউজার খোঁজা
-                  var snap = await FirebaseFirestore.instance.collection('users').where('email', isEqualTo: emailCtrl.text.trim()).get();
+                  var snap = await FirebaseFirestore.instance.collection('users').where('email', isEqualTo: targetEmail).get();
                   if(snap.docs.isNotEmpty) {
                     await snap.docs.first.reference.update({'role': selectedRole});
+                    await _logAdminAction('Role Change', 'Changed role of $targetEmail to $selectedRole');
+
                     if(mounted) Navigator.pop(context);
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Role updated to ${selectedRole.toUpperCase()} successfully!')));
                   } else {
@@ -4714,113 +5847,309 @@ class _AdminSettingsState extends State<AdminSettings> {
       body: SingleChildScrollView(
         child: Column(
           children:[
-            // অ্যাডমিন প্রোফাইল হেডার (StreamBuilder দিয়ে রিয়েল-টাইম ছবি চেঞ্জ হবে)
             StreamBuilder<DocumentSnapshot>(
               stream: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).snapshots(),
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) return const SizedBox(height: 150, child: Center(child: CircularProgressIndicator()));
                 
                 var data = snapshot.hasData && snapshot.data!.exists ? snapshot.data!.data() as Map<String, dynamic> : {};
-                String name = data['name'] ?? 'Chief Admin';
+                String name = data['name'] ?? 'Admin';
+                String role = data['role'] ?? 'admin';
                 String img = data.containsKey('profile_image_url') ? data['profile_image_url'] : '';
+                
+                bool isSuperAdmin = role == 'super_admin';
 
-                return Container(
-                  width: double.infinity, padding: const EdgeInsets.all(20), decoration: const BoxDecoration(color: Colors.white), 
-                  child: Column(
-                    children: [
-                      Stack(
-                        alignment: Alignment.bottomRight,
+                return Column(
+                  children:[
+                    Container(
+                      width: double.infinity, padding: const EdgeInsets.all(20), decoration: const BoxDecoration(color: Colors.white), 
+                      child: Column(
                         children:[
-                          CircleAvatar(
-                            radius: 45, backgroundColor: Colors.deepPurple.shade50,
-                            backgroundImage: img.isNotEmpty ? NetworkImage(img) : null,
-                            child: img.isEmpty ? const Icon(Icons.admin_panel_settings, size: 50, color: Colors.deepPurple) : null,
+                          Stack(
+                            alignment: Alignment.bottomRight,
+                            children:[
+                              CircleAvatar(
+                                radius: 45, backgroundColor: Colors.deepPurple.shade50,
+                                backgroundImage: img.isNotEmpty ? NetworkImage(img) : null,
+                                child: img.isEmpty ? const Icon(Icons.admin_panel_settings, size: 50, color: Colors.deepPurple) : null,
+                              ),
+                              InkWell(
+                                onTap: _uploadAdminProfilePicture,
+                                child: Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: const BoxDecoration(color: Colors.deepOrange, shape: BoxShape.circle),
+                                  child: const Icon(Icons.camera_alt, color: Colors.white, size: 16)
+                                ),
+                              )
+                            ],
                           ),
-                          InkWell(
-                            onTap: _uploadAdminProfilePicture,
-                            child: Container(
-                              padding: const EdgeInsets.all(6),
-                              decoration: const BoxDecoration(color: Colors.deepOrange, shape: BoxShape.circle),
-                              child: const Icon(Icons.camera_alt, color: Colors.white, size: 16)
+                          const SizedBox(height: 15), 
+                          Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), 
+                          // প্রোফাইলে সুপার অ্যাডমিন নাকি শুধু অ্যাডমিন তা দেখাবে
+                          Container(
+                            margin: const EdgeInsets.only(top: 5),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: isSuperAdmin ? Colors.deepOrange.shade100 : Colors.blue.shade100,
+                              borderRadius: BorderRadius.circular(10)
                             ),
+                            child: Text(isSuperAdmin ? 'SUPER ADMIN' : 'STAFF ADMIN', style: TextStyle(color: isSuperAdmin ? Colors.deepOrange : Colors.blue, fontSize: 10, fontWeight: FontWeight.bold)),
+                          )
+                        ]
+                      )
+                    ),
+                    
+                    Padding(
+                      padding: const EdgeInsets.all(15.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children:[
+                          const Text('Control Center', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 10),
+                          
+                          // এই অপশনগুলো সবাই দেখতে পাবে
+                          _buildSettingItem(Icons.store, 'Store Details', onTap: () {
+                            Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminStoreDetailsPage()));
+                          }),
+                          _buildSettingItem(Icons.people, 'Customer & Staff List', trailingText: 'View', onTap: () {
+                             Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminUserStatusPage(role: 'admin', title: 'Staff & Admins')));
+                          }),
+                          
+                          // =====================================
+                          // শুধুমাত্র SUPER ADMIN এই অপশনগুলো দেখতে ও কন্ট্রোল করতে পারবে
+                          // =====================================
+                          if (isSuperAdmin) ...[
+                            const SizedBox(height: 20),
+                            const Text('Super Admin Privileges', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                            const SizedBox(height: 10),
+                            
+                            _buildSettingItem(Icons.settings_applications, 'App Config (Commission)', onTap: _showAppConfigDialog),
+                            _buildSettingItem(Icons.admin_panel_settings, 'Role Management', onTap: _showRoleManagementDialog),
+                            _buildSettingItem(Icons.security, 'Security Log', onTap: () {
+                               Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminSecurityLogPage()));
+                            }),
+                            _buildSettingItem(Icons.cloud_download, 'Export Database', onTap: () {
+                               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Report export feature will be available soon!')));
+                            }),
+                          ],
+                          
+                          // যদি সাধারণ স্টাফ হয়, তবে তাকে মেসেজ দেখাবে
+                          if (!isSuperAdmin) ...[
+                            const SizedBox(height: 20),
+                            Container(
+                              padding: const EdgeInsets.all(15),
+                              decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red.shade100)),
+                              child: Row(
+                                children: const[
+                                  Icon(Icons.lock, color: Colors.redAccent),
+                                  SizedBox(width: 10),
+                                  Expanded(child: Text('You are logged in as a Staff Admin. Some sensitive settings are hidden from your account.', style: TextStyle(color: Colors.redAccent, fontSize: 12))),
+                                ],
+                              ),
+                            )
+                          ],
+
+                          const SizedBox(height: 30),
+                          SizedBox(
+                            width: double.infinity, 
+                            child: TextButton.icon(
+                              onPressed: () async {
+                                SharedPreferences prefs = await SharedPreferences.getInstance();
+                                await prefs.clear();
+                                await FirebaseAuth.instance.signOut(); 
+                                if(context.mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                              }, 
+                              icon: const Icon(Icons.logout, color: Colors.red),
+                              label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold))
+                            )
                           )
                         ],
                       ),
-                      const SizedBox(height: 15), 
-                      Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), 
-                      const Text('Chief Admin', style: TextStyle(color: Colors.grey))
-                    ]
-                  )
+                    )
+                  ],
                 );
               }
             ),
-            
-            // মেনু অপশনগুলো
-            Padding(
-              padding: const EdgeInsets.all(15.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children:[
-                  const Text('Control Center', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  
-                  _buildSettingItem(Icons.store, 'Store Details', onTap: () {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Store info setup is coming soon!')));
-                  }),
-                  
-                  _buildSettingItem(Icons.settings_applications, 'App Config', onTap: _showAppConfigDialog),
-                  
-                  _buildSettingItem(Icons.people, 'Staff Accounts', trailingText: 'Manage', onTap: () {
-                     // আগে তৈরি করা AdminUserStatusPage ব্যবহার করা হলো
-                     Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminUserStatusPage(role: 'admin', title: 'Staff & Admins')));
-                  }),
-                  
-                  _buildSettingItem(Icons.admin_panel_settings, 'Role Management', onTap: _showRoleManagementDialog),
-                  
-                  _buildSettingItem(Icons.cloud_download, 'Data Backup', onTap: () {
-                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Simulating Database Backup... Done! ✅')));
-                  }),
-                  
-                  _buildSettingItem(Icons.security, 'Security Log', onTap: () {
-                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No security breaches detected. System is safe.')));
-                  }),
-                  
-                  const SizedBox(height: 30),
-                  SizedBox(
-                    width: double.infinity, 
-                    child: TextButton.icon(
-                      onPressed: () async {
-                        SharedPreferences prefs = await SharedPreferences.getInstance();
-                        await prefs.clear();
-                        await FirebaseAuth.instance.signOut(); 
-                        if(context.mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
-                      }, 
-                      icon: const Icon(Icons.logout, color: Colors.red),
-                      label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold))
-                    )
-                  )
-                ],
-              ),
-            )
           ],
         ),
       ),
     );
   }
 
-  // হেল্পার উইজেট
   Widget _buildSettingItem(IconData icon, String title, {String? trailingText, VoidCallback? onTap}) {
     return Card(
-      elevation: 0,
-      color: Colors.white,
-      margin: const EdgeInsets.only(bottom: 8),
+      elevation: 0, color: Colors.white, margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
         leading: Icon(icon, color: Colors.grey[700]),
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-        trailing: trailingText != null 
-          ? Text(trailingText, style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)) 
-          : const Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey),
+        trailing: trailingText != null ? Text(trailingText, style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)) : const Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey),
         onTap: onTap,
+      ),
+    );
+  }
+}
+
+// ==========================================
+// নতুন পেজ ১: Admin Store Details Page (Global Platform Info)
+// ==========================================
+class AdminStoreDetailsPage extends StatefulWidget {
+  const AdminStoreDetailsPage({super.key});
+
+  @override
+  State<AdminStoreDetailsPage> createState() => _AdminStoreDetailsPageState();
+}
+
+class _AdminStoreDetailsPageState extends State<AdminStoreDetailsPage> {
+  final TextEditingController nameCtrl = TextEditingController();
+  final TextEditingController phoneCtrl = TextEditingController();
+  final TextEditingController emailCtrl = TextEditingController();
+  final TextEditingController addressCtrl = TextEditingController();
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStoreDetails();
+  }
+
+  Future<void> _loadStoreDetails() async {
+    try {
+      var doc = await FirebaseFirestore.instance.collection('app_config').doc('store_details').get();
+      if (doc.exists) {
+        var data = doc.data()!;
+        nameCtrl.text = data['platform_name'] ?? 'D Shop';
+        phoneCtrl.text = data['support_phone'] ?? '';
+        emailCtrl.text = data['support_email'] ?? '';
+        addressCtrl.text = data['office_address'] ?? '';
+      }
+    } catch (e) {}
+    setState(() => isLoading = false);
+  }
+
+  Future<void> _saveStoreDetails() async {
+    setState(() => isLoading = true);
+    try {
+      await FirebaseFirestore.instance.collection('app_config').doc('store_details').set({
+        'platform_name': nameCtrl.text.trim(),
+        'support_phone': phoneCtrl.text.trim(),
+        'support_email': emailCtrl.text.trim(),
+        'office_address': addressCtrl.text.trim(),
+        'updated_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Store details saved successfully! ✅')));
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+    setState(() => isLoading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(title: const Text('Store Details'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
+      body: isLoading 
+        ? const Center(child: CircularProgressIndicator())
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                const Text('Global Platform Information', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 5),
+                const Text('These details will be visible to customers in their Support section.', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                const SizedBox(height: 25),
+                
+                TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Platform Name', prefixIcon: Icon(Icons.store), border: OutlineInputBorder())),
+                const SizedBox(height: 15),
+                TextField(controller: phoneCtrl, decoration: const InputDecoration(labelText: 'Support Phone Number', prefixIcon: Icon(Icons.phone), border: OutlineInputBorder())),
+                const SizedBox(height: 15),
+                TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: 'Support Email', prefixIcon: Icon(Icons.email), border: OutlineInputBorder())),
+                const SizedBox(height: 15),
+                TextField(controller: addressCtrl, maxLines: 3, decoration: const InputDecoration(labelText: 'Physical Office Address', prefixIcon: Icon(Icons.location_on), border: OutlineInputBorder())),
+                
+                const SizedBox(height: 30),
+                SizedBox(
+                  width: double.infinity, height: 50,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                    onPressed: _saveStoreDetails, 
+                    icon: const Icon(Icons.save, color: Colors.white),
+                    label: const Text('SAVE DETAILS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                  )
+                )
+              ],
+            ),
+          )
+    );
+  }
+}
+
+// ==========================================
+// নতুন পেজ ২: Admin Security Log Page (Tracks Staff Actions)
+// ==========================================
+class AdminSecurityLogPage extends StatelessWidget {
+  const AdminSecurityLogPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(title: const Text('System Security Logs'), backgroundColor: Colors.blueGrey, foregroundColor: Colors.white),
+      body: StreamBuilder<QuerySnapshot>(
+        // লগের ডাটাবেস থেকে লেটেস্ট লগগুলো আগে আনবে (limit 50)
+        stream: FirebaseFirestore.instance.collection('security_logs').orderBy('timestamp', descending: true).limit(50).snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const[
+                  Icon(Icons.verified_user, size: 80, color: Colors.grey),
+                  SizedBox(height: 10),
+                  Text('No security logs found. System is quiet.', style: TextStyle(color: Colors.grey))
+                ],
+              )
+            );
+          }
+
+          var logs = snapshot.data!.docs;
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(15),
+            itemCount: logs.length,
+            itemBuilder: (context, index) {
+              var data = logs[index].data() as Map<String, dynamic>;
+              
+              String timeStr = 'Just now';
+              if (data['timestamp'] != null) {
+                DateTime dt = (data['timestamp'] as Timestamp).toDate();
+                timeStr = '${dt.day}/${dt.month}/${dt.year} - ${dt.hour}:${dt.minute}';
+              }
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 10),
+                child: ListTile(
+                  leading: CircleAvatar(backgroundColor: Colors.blueGrey.shade50, child: const Icon(Icons.admin_panel_settings, color: Colors.blueGrey)),
+                  title: Text(data['action'] ?? 'Unknown Action', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children:[
+                      Text(data['details'] ?? 'No details provided.', style: const TextStyle(color: Colors.black87, fontSize: 13)),
+                      const SizedBox(height: 5),
+                      Text('By: ${data['admin_email']} • $timeStr', style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                    ],
+                  ),
+                ),
+              );
+            }
+          );
+        },
       ),
     );
   }
@@ -4870,199 +6199,1002 @@ class _RiderMainScreenState extends State<RiderMainScreen> {
 }
 
 // ==========================================
-// রাইডার পেজ ১: Dashboard
+// রাইডার পেজ ১: Dashboard (Gig-Economy Ready & Live Tracking)
 // ==========================================
-class RiderDashboard extends StatelessWidget {
+class RiderDashboard extends StatefulWidget {
   const RiderDashboard({super.key});
 
   @override
+  State<RiderDashboard> createState() => _RiderDashboardState();
+}
+
+class _RiderDashboardState extends State<RiderDashboard> {
+
+  // রাইডারের অনলাইন/অফলাইন স্ট্যাটাস পরিবর্তন করার ফাংশন
+  Future<void> _toggleOnlineStatus(bool currentStatus) async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+        'is_online': !currentStatus,
+        'last_active': FieldValue.serverTimestamp(),
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(!currentStatus ? 'You are now ONLINE 🟢. Ready to receive tasks!' : 'You are now OFFLINE 🔴.'),
+          backgroundColor: !currentStatus ? Colors.green : Colors.red,
+          duration: const Duration(seconds: 2),
+        )
+      );
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return const Center(child: Text('Please login'));
+
     return Scaffold(
-      backgroundColor: Colors.grey[100],
-      appBar: AppBar(backgroundColor: Colors.deepOrange, title: const Text('D Shop RIDER', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), leading: const Icon(Icons.menu, color: Colors.white), actions:[IconButton(icon: const Icon(Icons.notifications_active, color: Colors.white), onPressed: () {})]),
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(
+        backgroundColor: Colors.deepOrange, 
+        title: const Text('D Shop RIDER', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), 
+        actions:[IconButton(icon: const Icon(Icons.notifications_active, color: Colors.white), onPressed: () {})]
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(15),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
-            Row(children:[
-              const CircleAvatar(radius: 35, backgroundColor: Colors.teal, child: Icon(Icons.person, color: Colors.white, size: 40)), const SizedBox(width: 15),
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children:[const Text('Rahim Ahmed', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: Colors.green[100], borderRadius: BorderRadius.circular(10)), child: Row(children: const[Icon(Icons.verified, size: 14, color: Colors.green), SizedBox(width: 4), Text('Verified Rider', style: TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.bold))]))])
-            ]),
+            // ==========================================
+            // ১. রাইডার প্রোফাইল এবং অনলাইন/অফলাইন টগল
+            // ==========================================
+            StreamBuilder<DocumentSnapshot>(
+              stream: FirebaseFirestore.instance.collection('users').doc(currentUser.uid).snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) return const Center(child: CircularProgressIndicator());
+                
+                var data = snapshot.hasData && snapshot.data!.exists ? snapshot.data!.data() as Map<String, dynamic> : {};
+                String name = data['name'] ?? 'Rider';
+                String profileImg = data.containsKey('profile_image_url') ? data['profile_image_url'] : '';
+                bool isVerified = data.containsKey('is_verified') ? data['is_verified'] : false;
+                bool isOnline = data.containsKey('is_online') ? data['is_online'] : false;
+
+                return Column(
+                  children:[
+                    Row(
+                      children:[
+                        CircleAvatar(
+                          radius: 35, backgroundColor: Colors.teal.shade100, 
+                          backgroundImage: profileImg.isNotEmpty ? NetworkImage(profileImg) : null,
+                          child: profileImg.isEmpty ? const Icon(Icons.motorcycle, color: Colors.teal, size: 35) : null
+                        ), 
+                        const SizedBox(width: 15),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start, 
+                            children:[
+                              Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), 
+                              const SizedBox(height: 4),
+                              Row(
+                                children:[
+                                  Icon(Icons.verified, size: 14, color: isVerified ? Colors.green : Colors.grey), 
+                                  const SizedBox(width: 4), 
+                                  Text(isVerified ? 'Verified Rider' : 'Pending Verification', style: TextStyle(color: isVerified ? Colors.green : Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+                                ],
+                              )
+                            ]
+                          ),
+                        ),
+                        // Online / Offline Power Button
+                        InkWell(
+                          onTap: () => _toggleOnlineStatus(isOnline),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: isOnline ? Colors.green : Colors.red,
+                              borderRadius: BorderRadius.circular(20),
+                              boxShadow:[BoxShadow(color: (isOnline ? Colors.green : Colors.red).withOpacity(0.3), blurRadius: 8, offset: const Offset(0, 3))]
+                            ),
+                            child: Row(
+                              children:[
+                                Icon(isOnline ? Icons.wifi : Icons.power_settings_new, color: Colors.white, size: 16),
+                                const SizedBox(width: 5),
+                                Text(isOnline ? 'ONLINE' : 'OFFLINE', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                              ],
+                            ),
+                          ),
+                        )
+                      ]
+                    ),
+                    const SizedBox(height: 20),
+                    
+                    if (!isOnline)
+                      Container(
+                        width: double.infinity, padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red.shade200)),
+                        child: Row(
+                          children: const[
+                            Icon(Icons.warning_amber_rounded, color: Colors.red),
+                            SizedBox(width: 10),
+                            Expanded(child: Text('You are offline. Go online to start receiving delivery tasks from admin.', style: TextStyle(color: Colors.red, fontSize: 12))),
+                          ],
+                        ),
+                      )
+                  ],
+                );
+              }
+            ),
             const SizedBox(height: 20),
-            Container(width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade200)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[const Text('Today\'s Earnings', style: TextStyle(fontSize: 16)), const Text('৳৪,৫০০', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.black87)), const SizedBox(height: 15), Row(children:[Expanded(child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.teal[50], borderRadius: BorderRadius.circular(10)), child: Column(children: const[Text('Deliveries Completed', style: TextStyle(fontSize: 10, color: Colors.teal)), Text('12', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.teal))]))), const SizedBox(width: 10), Expanded(child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.amber[50], borderRadius: BorderRadius.circular(10)), child: Column(children: const[Text('Overall Rating', style: TextStyle(fontSize: 10, color: Colors.orange)), Text('4.8/5', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.orange))])))]),])),
-            const SizedBox(height: 20),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const[Text('Active Tasks', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey)]),
+
+            // ==========================================
+            // ২. পারফরম্যান্স স্ট্যাটাস (লাইভ ডাটা)
+            // ==========================================
+            StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance.collection('orders').where('assigned_rider_id', isEqualTo: currentUser.uid).snapshots(),
+              builder: (context, snapshot) {
+                int completedToday = 0;
+                double estimatedEarnings = 0;
+
+                if (snapshot.hasData) {
+                  for (var doc in snapshot.data!.docs) {
+                    var data = doc.data() as Map<String, dynamic>;
+                    if (data['status'] == 'Delivered') {
+                      // যদি ডেলিভারি আজকে হয়ে থাকে (Simple check)
+                      if (data['order_date'] != null) {
+                         DateTime dt = (data['order_date'] as Timestamp).toDate();
+                         if (dt.day == DateTime.now().day && dt.month == DateTime.now().month) {
+                           completedToday++;
+                           // পার ডেলিভারি একটি ফিক্সড এমাউন্ট ধরা হলো (যেমন: ৪০ টাকা), ভবিষ্যতে এটি ডাইনামিক হবে
+                           estimatedEarnings += 40.0; 
+                         }
+                      }
+                    }
+                  }
+                }
+
+                return Container(
+                  width: double.infinity, padding: const EdgeInsets.all(20), 
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade200)), 
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start, 
+                    children:[
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children:[
+                          const Text('Today\'s Earnings', style: TextStyle(fontSize: 14, color: Colors.grey, fontWeight: FontWeight.bold)),
+                          const Text('Base Pay + Task Bonus', style: TextStyle(fontSize: 10, color: Colors.teal)),
+                        ],
+                      ), 
+                      Text('৳${estimatedEarnings.toStringAsFixed(0)}', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.black87)), 
+                      const SizedBox(height: 15), 
+                      Row(
+                        children:[
+                          Expanded(child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.teal.shade50, borderRadius: BorderRadius.circular(10)), child: Column(children:[const Text('Deliveries Today', style: TextStyle(fontSize: 10, color: Colors.teal, fontWeight: FontWeight.bold)), Text('$completedToday', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.teal))]))), 
+                          const SizedBox(width: 10), 
+                          Expanded(child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.amber.shade50, borderRadius: BorderRadius.circular(10)), child: Column(children: const[Text('Overall Rating', style: TextStyle(fontSize: 10, color: Colors.orange, fontWeight: FontWeight.bold)), Text('5.0', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.orange))]))),
+                        ]
+                      )
+                    ]
+                  )
+                );
+              }
+            ),
+            const SizedBox(height: 25),
+
+            // ==========================================
+            // ৩. অ্যাক্টিভ টাস্ক লিস্ট (Admin Assigned)
+            // ==========================================
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+              children: const[
+                Text('Active Tasks', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), 
+                Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey)
+              ]
+            ),
             const SizedBox(height: 10),
-            _buildActiveTaskItem("Pick-up", "Cotton T-Shirt", "Jane Doe", Colors.amber),
-            _buildActiveTaskItem("Drop-off", "Smart Watch", "Jane Doe", Colors.redAccent),
-            const SizedBox(height: 20),
-            const Text('QUICK ACTION', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 10),
-            Row(children:[Expanded(child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, padding: const EdgeInsets.symmetric(vertical: 12)), icon: const Icon(Icons.power_settings_new, color: Colors.white), label: const Text('Go Offline', style: TextStyle(color: Colors.white)), onPressed: (){})), const SizedBox(width: 15), Expanded(child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, padding: const EdgeInsets.symmetric(vertical: 12)), icon: const Icon(Icons.analytics, color: Colors.white), label: const Text('Analytics', style: TextStyle(color: Colors.white)), onPressed: (){}))])
+
+            StreamBuilder<QuerySnapshot>(
+              // শুধুমাত্র এই রাইডারকে দেওয়া এবং 'Dispatched' স্ট্যাটাসে থাকা অর্ডারগুলো আনবে
+              stream: FirebaseFirestore.instance.collection('orders')
+                  .where('assigned_rider_id', isEqualTo: currentUser.uid)
+                  .where('status', isEqualTo: 'Dispatched')
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator()));
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                  return Container(
+                    width: double.infinity, padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)),
+                    child: Column(
+                      children: const[
+                         Icon(Icons.coffee, size: 40, color: Colors.grey),
+                         SizedBox(height: 10),
+                         Text('No active tasks right now.\nTake a break or wait for admin to assign.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey))
+                      ],
+                    ),
+                  );
+                }
+
+                var tasks = snapshot.data!.docs;
+
+                return ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: tasks.length,
+                  itemBuilder: (context, index) {
+                    var doc = tasks[index];
+                    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+                    
+                    // প্রথম আইটেমের নাম বের করা (সিম্পল দেখানোর জন্য)
+                    List<dynamic> items = data['items'] ??[];
+                    String itemName = items.isNotEmpty ? items[0]['product_name'] : 'Unknown Item';
+                    if (items.length > 1) itemName += ' (+${items.length - 1} more)';
+
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 10), 
+                      decoration: BoxDecoration(color: Colors.teal.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.teal.shade200)), 
+                      child: ListTile(
+                        leading: const CircleAvatar(backgroundColor: Colors.teal, child: Icon(Icons.delivery_dining, color: Colors.white)), 
+                        title: Text('Deliver: $itemName', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), 
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('To: ${data['shipping_name'] ?? 'Customer'}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                            Text('Amount to collect: ৳${data['total_amount']}', style: const TextStyle(fontSize: 12, color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+                          ],
+                        ), 
+                        trailing: ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, padding: const EdgeInsets.symmetric(horizontal: 10)),
+                          onPressed: () {
+                            // পরবর্তীতে এই বাটনে চাপ দিলে ২ নম্বর (Tasks) বা ৩ নম্বর (Route) পেজে নিয়ে যাবে
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Go to Tasks tab for details!')));
+                          },
+                          child: const Text('View', style: TextStyle(color: Colors.white, fontSize: 12)),
+                        )
+                      )
+                    );
+                  }
+                );
+              }
+            ),
           ],
         ),
       ),
     );
   }
-
-  Widget _buildActiveTaskItem(String type, String item, String name, Color color) {
-    return Container(margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), child: ListTile(leading: Icon(type == 'Pick-up' ? Icons.shopping_bag : Icons.location_on, color: color), title: Text('$type: $item', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), subtitle: Text('Drop-off: $name', style: const TextStyle(fontSize: 12)), trailing: const Icon(Icons.arrow_forward_ios, size: 12)));
-  }
 }
 
 // ==========================================
-// রাইডার পেজ ২: Task Management
+// রাইডার পেজ ২: Task Management (Real-time Order Workflow)
 // ==========================================
 class RiderTaskManagement extends StatelessWidget {
   const RiderTaskManagement({super.key});
 
   @override
   Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return const Center(child: Text('Please login'));
+
     return DefaultTabController(
-      length: 4,
+      length: 3,
       child: Scaffold(
+        backgroundColor: Colors.grey.shade100,
         appBar: AppBar(
           backgroundColor: Colors.amber[100], elevation: 0,
           title: const Text('TASK MANAGEMENT', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), leading: const Icon(Icons.arrow_back_ios, color: Colors.black),
-          bottom: const TabBar(isScrollable: true, labelColor: Colors.black, indicatorColor: Colors.deepOrange, tabs:[Tab(text: 'All Tasks'), Tab(text: 'Pending'), Tab(text: 'In-Transit'), Tab(text: 'Delivered')]),
+          bottom: const TabBar(
+            isScrollable: true, labelColor: Colors.black, indicatorColor: Colors.deepOrange, 
+            tabs:[
+              Tab(text: 'Pending Pickup (দোকানে আছে)'), 
+              Tab(text: 'In-Transit (রাস্তায়)'), 
+              Tab(text: 'Delivered (ডেলিভারি সম্পন্ন)')
+            ]
+          ),
         ),
-        body: ListView(
-          padding: const EdgeInsets.all(15),
-          children:[
-            _buildTaskCard("21309", "Pick-up", "21 Customer, Uttara, Dhaka", "Assigned", Colors.teal),
-            _buildTaskCard("21307", "Drop-off", "71 Raman Sarhiar, H-12, Uttara, Dhaka", "Pending Acceptance", Colors.orange),
-            _buildTaskCard("21337", "Drop-off", "71 Raman Sarhiar, H-12, Uttara, Dhaka", "In-Transit", Colors.teal),
-          ],
+        body: StreamBuilder<QuerySnapshot>(
+          stream: FirebaseFirestore.instance.collection('orders').where('assigned_rider_id', isEqualTo: currentUser.uid).orderBy('order_date', descending: true).snapshots(),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+            if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('No assigned tasks.'));
+
+            var allTasks = snapshot.data!.docs;
+            // স্ট্যাটাস অনুযায়ী ফিল্টার
+            var pendingPickup = allTasks.where((doc) => doc['status'] == 'Dispatched').toList(); // অ্যাডমিন অ্যাসাইন করলে Dispatched হয়
+            var inTransit = allTasks.where((doc) => doc['status'] == 'In-Transit').toList();
+            var delivered = allTasks.where((doc) => doc['status'] == 'Delivered').toList();
+
+            return TabBarView(
+              children:[
+                _buildTaskList(pendingPickup, 'Pick Up', Colors.orange),
+                _buildTaskList(inTransit, 'Deliver Now', Colors.blue),
+                _buildTaskList(delivered, 'Done', Colors.green, isCompleted: true),
+              ],
+            );
+          }
         ),
       ),
     );
   }
 
-  Widget _buildTaskCard(String id, String type, String address, String status, Color statusColor) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 15), padding: const EdgeInsets.all(15),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade300)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children:[
-          Text('Task ID: $id', style: const TextStyle(fontWeight: FontWeight.bold)),
-          Text('Type: $type', style: const TextStyle(color: Colors.grey)),
-          Text('Address: $address', style: const TextStyle(color: Colors.grey)),
-          Row(children:[const Text('Status: ', style: TextStyle(color: Colors.grey)), Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2), decoration: BoxDecoration(color: statusColor.withOpacity(0.2), borderRadius: BorderRadius.circular(5)), child: Text(status, style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12)))]),
-          const SizedBox(height: 15),
-          SizedBox(width: double.infinity, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal), onPressed: (){}, child: const Text('Complete Task', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))))
-        ],
-      ),
+  Widget _buildTaskList(List<QueryDocumentSnapshot> tasks, String actionText, Color actionColor, {bool isCompleted = false}) {
+    if (tasks.isEmpty) return Center(child: Text('এই ট্যাবে কোনো টাস্ক নেই।', style: TextStyle(color: Colors.grey.shade500)));
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(15),
+      itemCount: tasks.length,
+      itemBuilder: (context, index) {
+        var doc = tasks[index];
+        var data = doc.data() as Map<String, dynamic>;
+        
+        String orderId = doc.id.substring(0, 8).toUpperCase();
+        String customerName = data['shipping_name'] ?? 'Unknown';
+        String address = data['shipping_address_text'] ?? 'No Address';
+        String status = data['status'] ?? 'Unknown';
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 15), padding: const EdgeInsets.all(15),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade300)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children:[
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children:[
+                  Text('Order ID: $orderId', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2), decoration: BoxDecoration(color: actionColor.withOpacity(0.1), borderRadius: BorderRadius.circular(5)), child: Text(status, style: TextStyle(color: actionColor, fontWeight: FontWeight.bold, fontSize: 12))),
+                ]
+              ),
+              const SizedBox(height: 5),
+              Text('Customer: $customerName', style: const TextStyle(color: Colors.black87)),
+              Text('Drop-off: $address', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+              const Divider(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children:[
+                  Text('Collect: ৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+                  if (!isCompleted)
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: actionColor), 
+                      onPressed: () async {
+                        // বাটন লজিক: Pick Up চাপলে In-Transit হবে, Deliver চাপলে Delivered হবে
+                        String newStatus = status == 'Dispatched' ? 'In-Transit' : 'Delivered';
+                        await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({'status': newStatus});
+                        
+                        // কাস্টমারকে নোটিফিকেশন পাঠানো
+                        String msg = newStatus == 'In-Transit' ? 'is on the way to your address 🛵' : 'has been delivered successfully ✅';
+                        await FirebaseFirestore.instance.collection('notifications').add({
+                          'target_user_id': data['user_id'],
+                          'title': 'Delivery Update',
+                          'message': 'Your order #$orderId $msg',
+                          'sent_at': FieldValue.serverTimestamp(),
+                        });
+                      }, 
+                      child: Text(actionText, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                    )
+                ],
+              )
+            ],
+          ),
+        );
+      }
     );
   }
 }
 
 // ==========================================
-// রাইডার পেজ ৩: Order Details & Navigation
+// রাইডার পেজ ৩: Active Route / Order Details (Live Navigation)
 // ==========================================
 class RiderOrderDetails extends StatelessWidget {
   const RiderOrderDetails({super.key});
 
   @override
   Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return const Center(child: Text('Please login'));
+
     return Scaffold(
-      appBar: AppBar(backgroundColor: Colors.amber[100], elevation: 0, title: const Text('ORDER DETAILS & NAV', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), leading: const Icon(Icons.arrow_back_ios, color: Colors.black), actions: const[Icon(Icons.filter_alt_outlined, color: Colors.deepOrange), SizedBox(width: 15)]),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(15),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children:[
-            const Text('Current Task: In-Transit', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const Text('(Order ID: ২১১৩৭)', style: TextStyle(color: Colors.grey)),
-            const SizedBox(height: 15),
-            Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade300)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Row(children: const[Text('Customer: ', style: TextStyle(fontWeight: FontWeight.bold)), Text('Jane Doe')]), Row(children: const[Text('Phone: ', style: TextStyle(fontWeight: FontWeight.bold)), Text('01-524-2330')]), Row(crossAxisAlignment: CrossAxisAlignment.start, children: const[Text('Address: ', style: TextStyle(fontWeight: FontWeight.bold)), Expanded(child: Text('Address (mapped), H-12, Rs.10.1, Sec-7, Uttara, Dhaka'))]), const SizedBox(height: 15), SizedBox(width: double.infinity, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal), icon: const Icon(Icons.navigation, color: Colors.white), label: const Text('Navigate', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)), onPressed: (){}))])),
-            const SizedBox(height: 20),
-            const Text('Order Content', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10),
-            _buildOrderContentItem('KY২৬৬০০', '৳২,৮০০', Icons.headphones),
-            _buildOrderContentItem('SMART WATCH', '৳২,৮০০', Icons.watch),
-            const SizedBox(height: 20),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Status', style: TextStyle(fontWeight: FontWeight.bold)), Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)), child: Row(children: const[Text('In-Transit'), Icon(Icons.arrow_drop_down)]))]),
-            const SizedBox(height: 20),
-            SizedBox(width: double.infinity, height: 50, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal), icon: const Icon(Icons.call, color: Colors.white), label: const Text('Call Customer', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)), onPressed: (){}))
-          ],
-        ),
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(backgroundColor: Colors.amber[100], elevation: 0, title: const Text('ACTIVE ROUTE', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), leading: const Icon(Icons.arrow_back_ios, color: Colors.black)),
+      body: StreamBuilder<QuerySnapshot>(
+        // এই পেজটি শুধুমাত্র সেই অর্ডারটি দেখাবে যেটি বর্তমানে 'In-Transit' অবস্থায় আছে
+        stream: FirebaseFirestore.instance.collection('orders')
+            .where('assigned_rider_id', isEqualTo: currentUser.uid)
+            .where('status', isEqualTo: 'In-Transit')
+            .limit(1) // একসাথে একটি ডেলিভারির রুট দেখাবে
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const[
+                  Icon(Icons.map_outlined, size: 80, color: Colors.grey),
+                  SizedBox(height: 15),
+                  Text('No active delivery route right now.\nPlease pick up a task from the Tasks tab.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 16)),
+                ],
+              )
+            );
+          }
+
+          var doc = snapshot.data!.docs.first;
+          var data = doc.data() as Map<String, dynamic>;
+          List<dynamic> items = data['items'] ??[];
+
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(15),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                const Text('Current Active Delivery', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                Text('(Order ID: ${doc.id.substring(0, 8).toUpperCase()})', style: const TextStyle(color: Colors.grey)),
+                const SizedBox(height: 15),
+                
+                // Customer Information Box
+                Container(
+                  padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade300)), 
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start, 
+                    children:[
+                      Row(children:[const Icon(Icons.person, size: 16, color: Colors.teal), const SizedBox(width: 8), const Text('Customer: ', style: TextStyle(fontWeight: FontWeight.bold)), Text(data['shipping_name'] ?? 'Unknown')]), 
+                      const SizedBox(height: 5),
+                      Row(children:[const Icon(Icons.phone, size: 16, color: Colors.teal), const SizedBox(width: 8), const Text('Phone: ', style: TextStyle(fontWeight: FontWeight.bold)), Text(data['shipping_phone'] ?? 'N/A')]), 
+                      const SizedBox(height: 5),
+                      Row(crossAxisAlignment: CrossAxisAlignment.start, children:[const Icon(Icons.location_on, size: 16, color: Colors.red), const SizedBox(width: 8), const Text('Address: ', style: TextStyle(fontWeight: FontWeight.bold)), Expanded(child: Text(data['shipping_address_text'] ?? 'No Address provided'))]), 
+                      
+                      const SizedBox(height: 15), 
+                      // Navigation & Call Buttons
+                      Row(
+                        children:[
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal), 
+                              icon: const Icon(Icons.navigation, color: Colors.white, size: 18), 
+                              label: const Text('Navigate', style: TextStyle(color: Colors.white)), 
+                              onPressed: () async {
+                                // গুগল ম্যাপে রুট ওপেন করার লজিক
+                                String address = Uri.encodeComponent(data['shipping_address_text'] ?? '');
+                                final Uri googleMapsUrl = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$address");
+                                if (await canLaunchUrl(googleMapsUrl)) {
+                                  await launchUrl(googleMapsUrl);
+                                } else {
+                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open Google Maps.')));
+                                }
+                              }
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue), 
+                            onPressed: () async {
+                              // কল করার লজিক
+                              final Uri telUrl = Uri.parse("tel:${data['shipping_phone']}");
+                              if (await canLaunchUrl(telUrl)) await launchUrl(telUrl);
+                            }, 
+                            child: const Icon(Icons.call, color: Colors.white)
+                          )
+                        ],
+                      )
+                    ]
+                  )
+                ),
+                const SizedBox(height: 20),
+                
+                // Order Contents
+                const Text('Order Contents', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10),
+                ...items.map((item) {
+                   return Card(
+                     margin: const EdgeInsets.only(bottom: 10), 
+                     child: ListTile(
+                       leading: Container(width: 50, height: 50, decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(10)), child: item['image_url'] != null ? Image.network(item['image_url'], fit: BoxFit.cover) : const Icon(Icons.inventory_2)), 
+                       title: Text(item['product_name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13), maxLines: 1, overflow: TextOverflow.ellipsis), 
+                       subtitle: Text('Qty: ${item['quantity']} | ৳${item['price']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold))
+                     )
+                   );
+                }).toList(),
+                
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.orange.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.orange)),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children:[
+                      const Text('Total to Collect:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      Text('৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 20))
+                    ],
+                  ),
+                ),
+                
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity, height: 50, 
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green), 
+                    onPressed: () async {
+                      // ডেলিভারি সম্পন্ন করার লজিক
+                      await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({'status': 'Delivered'});
+                      if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delivery marked as Completed! ✅')));
+                    }, 
+                    child: const Text('Mark as Delivered', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
+                  )
+                )
+              ],
+            ),
+          );
+        }
       ),
     );
-  }
-  Widget _buildOrderContentItem(String title, String price, IconData icon) {
-    return Card(margin: const EdgeInsets.only(bottom: 10), child: ListTile(leading: Container(width: 50, height: 50, decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(10)), child: Icon(icon)), title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)), subtitle: Text(price, style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold))));
   }
 }
 
 // ==========================================
-// রাইডার পেজ ৪: Delivery & Earnings (Settle)
+// রাইডার পেজ ৪: Delivery Settle & COD Collection
 // ==========================================
 class RiderDeliveryEarnings extends StatelessWidget {
   const RiderDeliveryEarnings({super.key});
 
   @override
   Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return const Center(child: Text('Please login'));
+
     return Scaffold(
-      backgroundColor: Colors.amber[50],
-      appBar: AppBar(backgroundColor: Colors.amber[100], elevation: 0, title: const Text('DELIVERY & EARNINGS', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), leading: const Icon(Icons.arrow_back_ios, color: Colors.black)),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(15),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children:[
-            const Text('Complete Delivery', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 15),
-            Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[const Text('Delivery Summary', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const Divider(), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const[Text('Order ID'), Text('21307', style: TextStyle(fontWeight: FontWeight.bold))]), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const[Text('Taka'), Text('৳৩,২০০', style: TextStyle(fontWeight: FontWeight.bold))]), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const[Text('Customer'), Text('Jane Doe', style: TextStyle(fontWeight: FontWeight.bold))])])),
-            const SizedBox(height: 20),
-            const Text('Cash Collection', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10),
-            Container(decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: Column(children:[RadioListTile(value: 1, groupValue: 2, onChanged: (v){}, title: Row(children: const[Icon(Icons.account_balance_wallet, color: Colors.pink), SizedBox(width: 10), Text('bKash/Nagad')])), const Divider(height: 1), RadioListTile(value: 2, groupValue: 2, activeColor: Colors.teal, onChanged: (v){}, title: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const[Row(children:[Icon(Icons.money, color: Colors.teal), SizedBox(width: 10), Text('Cash')]), Text('৳৩,২০০', style: TextStyle(fontWeight: FontWeight.bold))]))])),
-            const SizedBox(height: 20),
-            Container(width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: Column(children:[const Text('Signature', style: TextStyle(fontFamily: 'cursive', fontSize: 32, color: Colors.black54)), const Divider(), const Text('Digital Signature pad', style: TextStyle(color: Colors.grey)), const SizedBox(height: 10), OutlinedButton.icon(onPressed: (){}, icon: const Icon(Icons.camera_alt), label: const Text('Attach Photo (optional)'))])),
-            const SizedBox(height: 20),
-            SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal), onPressed: (){}, child: const Text('Mark as Delivered', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))))
-          ],
-        ),
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(backgroundColor: Colors.amber[100], elevation: 0, title: const Text('CASH COLLECTION', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), leading: const Icon(Icons.arrow_back_ios, color: Colors.black)),
+      body: StreamBuilder<QuerySnapshot>(
+        // রাইডার আজকে যতগুলো COD অর্ডার ডেলিভারি করেছে তার লিস্ট
+        stream: FirebaseFirestore.instance.collection('orders')
+            .where('assigned_rider_id', isEqualTo: currentUser.uid)
+            .where('status', isEqualTo: 'Delivered')
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          
+          double totalCashCollected = 0;
+          List<QueryDocumentSnapshot> codOrders =[];
+
+          if (snapshot.hasData) {
+            for (var doc in snapshot.data!.docs) {
+              var data = doc.data() as Map<String, dynamic>;
+              // শুধুমাত্র COD অর্ডারগুলো হিসাব করা হচ্ছে
+              if (data['payment_method'] == 'Cash on Delivery') {
+                codOrders.add(doc);
+                totalCashCollected += double.tryParse(data['total_amount'].toString()) ?? 0;
+              }
+            }
+          }
+
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(15),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                const Text('Settle with Admin', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), 
+                const SizedBox(height: 5),
+                const Text('সারাদিনে কাস্টমারদের কাছ থেকে যে ক্যাশ টাকা রিসিভ করেছেন, তা অ্যাডমিনকে বুঝিয়ে দিন।', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                const SizedBox(height: 20),
+                
+                // Cash Summary Box
+                Container(
+                  width: double.infinity, padding: const EdgeInsets.all(20), 
+                  decoration: BoxDecoration(color: Colors.teal.shade800, borderRadius: BorderRadius.circular(15)), 
+                  child: Column(
+                    children:[
+                      const Text('Total Cash on Hand (COD)', style: TextStyle(color: Colors.white70, fontSize: 14)), 
+                      const SizedBox(height: 10),
+                      Text('৳${totalCashCollected.toStringAsFixed(0)}', style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 10),
+                      Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(20)), child: Text('From ${codOrders.length} Deliveries', style: const TextStyle(color: Colors.white, fontSize: 12)))
+                    ]
+                  )
+                ),
+                const SizedBox(height: 25),
+                
+                // COD List
+                const Text('Cash Collection Breakdown', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), 
+                const SizedBox(height: 10),
+                
+                if (codOrders.isEmpty)
+                  const Center(child: Padding(padding: EdgeInsets.all(20), child: Text('No COD collection data.', style: TextStyle(color: Colors.grey))))
+                else
+                  ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: codOrders.length,
+                    itemBuilder: (context, index) {
+                      var doc = codOrders[index];
+                      var data = doc.data() as Map<String, dynamic>;
+                      return Card(
+                        child: ListTile(
+                          leading: const CircleAvatar(backgroundColor: Colors.greenAccent, child: Icon(Icons.attach_money, color: Colors.teal)),
+                          title: Text('Order #${doc.id.substring(0, 6)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text('Customer: ${data['shipping_name']}'),
+                          trailing: Text('+ ৳${data['total_amount']}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
+                        ),
+                      );
+                    }
+                  ),
+
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity, height: 50, 
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange), 
+                    onPressed: totalCashCollected > 0 ? () {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Settlement request sent to Admin!')));
+                    } : null, 
+                    child: const Text('Request Settlement', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
+                  )
+                )
+              ],
+            ),
+          );
+        }
       ),
     );
   }
 }
 
 // ==========================================
-// রাইডার পেজ ৫: Profile
+// রাইডার পেজ ৫: Profile (Vehicle Info, Payment Setup & Support)
 // ==========================================
-class RiderProfile extends StatelessWidget {
+class RiderProfile extends StatefulWidget {
   const RiderProfile({super.key});
+
+  @override
+  State<RiderProfile> createState() => _RiderProfileState();
+}
+
+class _RiderProfileState extends State<RiderProfile> {
+  final ImagePicker _picker = ImagePicker();
+
+  // প্রোফাইল ছবি আপলোড
+  Future<void> _uploadRiderProfilePicture() async {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    if (image == null || currentUser == null) return;
+
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+      String fileName = 'rider_profile_${currentUser.uid}_${DateTime.now().millisecondsSinceEpoch}';
+      Reference ref = FirebaseStorage.instance.ref().child('profile_pictures').child(fileName);
+      
+      if (kIsWeb) {
+        Uint8List bytes = await image.readAsBytes();
+        await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
+      } else {
+        await ref.putFile(File(image.path));
+      }
+      String downloadUrl = await ref.getDownloadURL();
+      await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({'profile_image_url': downloadUrl});
+
+      if (!mounted) return;
+      Navigator.pop(context); 
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile picture updated successfully! 🎉')));
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  // বাহনের তথ্য সেভ করার পপ-আপ
+  void _showVehicleInfoDialog(Map<String, dynamic> currentData) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+    String selectedVehicle = currentData['vehicle_type'] ?? 'Motorcycle';
+    TextEditingController plateCtrl = TextEditingController(text: currentData['vehicle_plate'] ?? '');
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Vehicle Information'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children:[
+                DropdownButtonFormField<String>(
+                  value: selectedVehicle,
+                  decoration: const InputDecoration(labelText: 'Vehicle Type', border: OutlineInputBorder(), isDense: true),
+                  items:['Motorcycle', 'Bicycle', 'Rickshaw', 'Private Car', 'Van'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+                  onChanged: (val) => setDialogState(() => selectedVehicle = val!),
+                ),
+                const SizedBox(height: 15),
+                TextField(
+                  controller: plateCtrl,
+                  decoration: const InputDecoration(labelText: 'License Plate (If applicable)', hintText: 'e.g. Dhaka-H-12-3456', border: OutlineInputBorder(), isDense: true),
+                )
+              ],
+            ),
+            actions:[
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                onPressed: () async {
+                  if (currentUser != null) {
+                    await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({
+                      'vehicle_type': selectedVehicle,
+                      'vehicle_plate': plateCtrl.text.trim(),
+                    });
+                    if (mounted) Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Vehicle Info Updated! 🛵')));
+                  }
+                }, 
+                child: const Text('Save', style: TextStyle(color: Colors.white))
+              )
+            ],
+          );
+        }
+      )
+    );
+  }
+
+  // হেল্প এবং সাপোর্ট পপ-আপ
+  void _showSupportOptions() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              Container(width: 40, height: 5, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10))),
+              const SizedBox(height: 20),
+              const Text('Rider Support', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              const Text('Contact the admin or dispatch team for help.', style: TextStyle(color: Colors.grey)),
+              const SizedBox(height: 20),
+              ListTile(
+                leading: const CircleAvatar(backgroundColor: Colors.teal, child: Icon(Icons.call, color: Colors.white)), 
+                title: const Text('Call Dispatch Team', style: TextStyle(fontWeight: FontWeight.bold)), 
+                subtitle: const Text('01700-000000'), 
+                onTap: () async { 
+                  final Uri url = Uri.parse('tel:01700000000'); 
+                  if (await canLaunchUrl(url)) await launchUrl(url); 
+                }
+              ),
+              const Divider(),
+              ListTile(
+                leading: const CircleAvatar(backgroundColor: Colors.deepOrange, child: Icon(Icons.email, color: Colors.white)), 
+                title: const Text('Email Support', style: TextStyle(fontWeight: FontWeight.bold)), 
+                subtitle: const Text('support@doharshop.com'), 
+                onTap: () async { 
+                  final Uri url = Uri.parse('mailto:support@doharshop.com?subject=Rider Help Needed'); 
+                  if (await canLaunchUrl(url)) await launchUrl(url); 
+                }
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
+        );
+      }
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+
+    return Scaffold(
+      appBar: AppBar(backgroundColor: Colors.teal.shade100, elevation: 0, leading: const Icon(Icons.arrow_back_ios, color: Colors.black)),
+      body: StreamBuilder<DocumentSnapshot>(
+        stream: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).snapshots(),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+          var data = snapshot.data!.data() as Map<String, dynamic>;
+          String img = data.containsKey('profile_image_url') ? data['profile_image_url'] : '';
+          
+          // ডাইনামিক রেটিং
+          double rating = data.containsKey('rating') ? double.tryParse(data['rating'].toString()) ?? 5.0 : 5.0;
+          int totalReviews = data.containsKey('total_reviews') ? data['total_reviews'] : 0;
+          String vehicle = data.containsKey('vehicle_type') ? data['vehicle_type'] : 'Not set';
+
+          return Column(
+            children:[
+              Container(
+                width: double.infinity, padding: const EdgeInsets.all(20), 
+                decoration: BoxDecoration(color: Colors.teal.shade100, borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(30), bottomRight: Radius.circular(30))), 
+                child: Column(
+                  children:[
+                    Stack(
+                      alignment: Alignment.bottomRight,
+                      children:[
+                        CircleAvatar(
+                          radius: 40, backgroundColor: Colors.teal, 
+                          backgroundImage: img.isNotEmpty ? NetworkImage(img) : null,
+                          child: img.isEmpty ? const Icon(Icons.person, color: Colors.white, size: 40) : null
+                        ),
+                        InkWell(
+                          onTap: _uploadRiderProfilePicture,
+                          child: Container(padding: const EdgeInsets.all(6), decoration: const BoxDecoration(color: Colors.deepOrange, shape: BoxShape.circle), child: const Icon(Icons.camera_alt, color: Colors.white, size: 14)),
+                        )
+                      ],
+                    ), 
+                    const SizedBox(height: 10), 
+                    Text(data['name'] ?? 'Rider', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), 
+                    Row(mainAxisAlignment: MainAxisAlignment.center, children: const[Icon(Icons.verified, color: Colors.green, size: 16), SizedBox(width: 5), Text('Verified Rider', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold))]), 
+                  ]
+                )
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.all(20),
+                  children:[
+                    const Text('RIDER RATINGS', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)), const SizedBox(height: 10),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+                      children:[
+                        Text('Based on $totalReviews reviews'), 
+                        Row(
+                          children: List.generate(5, (index) => Icon(Icons.star, color: index < rating.floor() ? Colors.orange : Colors.grey.shade300, size: 18))
+                        )
+                      ]
+                    ),
+                    const SizedBox(height: 5), 
+                    const Text('Common compliments: Fast | Polite', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                    const SizedBox(height: 25),
+                    
+                    const Text('SETTINGS & INFO', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                    
+                    // Vehicle Info
+                    ListTile(
+                      contentPadding: EdgeInsets.zero, 
+                      title: Row(children:[const Icon(Icons.directions_bike, color: Colors.teal), const SizedBox(width: 10), Text('Vehicle: $vehicle')]), 
+                      trailing: const Icon(Icons.edit, size: 16, color: Colors.grey), 
+                      onTap: () => _showVehicleInfoDialog(data)
+                    ),
+                    const Divider(height: 1),
+
+                    // Payment Info (Salary/Gig Payment)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero, 
+                      title: Row(children: const[Icon(Icons.account_balance_wallet, color: Colors.pink), SizedBox(width: 10), Text('Payout / Bank Info')]), 
+                      trailing: const Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey), 
+                      onTap: () {
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => const RiderPaymentInfoPage()));
+                      }
+                    ),
+                    const Divider(height: 1),
+
+                    // Help & Support
+                    ListTile(
+                      contentPadding: EdgeInsets.zero, 
+                      title: Row(children: const[Icon(Icons.help_outline, color: Colors.blue), SizedBox(width: 10), Text('Help & Support')]), 
+                      trailing: const Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey), 
+                      onTap: _showSupportOptions
+                    ),
+                    
+                    const SizedBox(height: 30),
+                    
+                    TextButton.icon(
+                      onPressed: () async {
+                        // অফলাইন করে লগআউট করা
+                        if(currentUser != null) await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({'is_online': false});
+                        SharedPreferences prefs = await SharedPreferences.getInstance();
+                        await prefs.clear();
+                        await FirebaseAuth.instance.signOut(); 
+                        if(context.mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                      }, 
+                      icon: const Icon(Icons.logout, color: Colors.red),
+                      label: const Text('Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 18))
+                    )
+                  ],
+                ),
+              )
+            ],
+          );
+        }
+      ),
+    );
+  }
+}
+
+// ==========================================
+// নতুন পেজ: Rider Payment Info (বিকাশ/ব্যাংক ডিটেইলস)
+// ==========================================
+class RiderPaymentInfoPage extends StatefulWidget {
+  const RiderPaymentInfoPage({super.key});
+
+  @override
+  State<RiderPaymentInfoPage> createState() => _RiderPaymentInfoPageState();
+}
+
+class _RiderPaymentInfoPageState extends State<RiderPaymentInfoPage> {
+  final TextEditingController bkashCtrl = TextEditingController();
+  final TextEditingController nagadCtrl = TextEditingController();
+  final TextEditingController accNameCtrl = TextEditingController();
+  final TextEditingController accNoCtrl = TextEditingController();
+  
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPaymentData();
+  }
+
+  Future<void> _loadPaymentData() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      var doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      if (doc.exists) {
+        var data = doc.data() as Map<String, dynamic>;
+        bkashCtrl.text = data['payout_bkash'] ?? '';
+        nagadCtrl.text = data['payout_nagad'] ?? '';
+        accNameCtrl.text = data['payout_bank_name'] ?? '';
+        accNoCtrl.text = data['payout_bank_acc'] ?? '';
+      }
+    }
+    setState(() => isLoading = false);
+  }
+
+  Future<void> _savePaymentData() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    
+    setState(() => isLoading = true);
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+        'payout_bkash': bkashCtrl.text.trim(),
+        'payout_nagad': nagadCtrl.text.trim(),
+        'payout_bank_name': accNameCtrl.text.trim(),
+        'payout_bank_acc': accNoCtrl.text.trim(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment info saved successfully! 💳')));
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+    setState(() => isLoading = false);
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(backgroundColor: Colors.orange[100], elevation: 0, leading: const Icon(Icons.arrow_back_ios, color: Colors.black)),
-      body: Column(
-        children:[
-          Container(width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.orange[100], borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(30), bottomRight: Radius.circular(30))), child: Column(children:[const CircleAvatar(radius: 40, backgroundColor: Colors.teal, child: Icon(Icons.person, color: Colors.white, size: 40)), const SizedBox(height: 10), const Text('Rahim Ahmed', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), Row(mainAxisAlignment: MainAxisAlignment.center, children: const[Icon(Icons.verified, color: Colors.green, size: 16), SizedBox(width: 5), Text('Verified Rider', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold))]), const SizedBox(height: 10), ElevatedButton(onPressed: (){}, style: ElevatedButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.deepOrange), child: const Text('Edit details'))])),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(20),
+      backgroundColor: Colors.white,
+      appBar: AppBar(title: const Text('Payout Information'), backgroundColor: Colors.teal, foregroundColor: Colors.white),
+      body: isLoading 
+        ? const Center(child: CircularProgressIndicator())
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children:[
-                const Text('EARNING HISTORY', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)), const SizedBox(height: 10),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const[Text('Date 15, 2021'), Text('৳6,000', style: TextStyle(fontWeight: FontWeight.bold))]), const Divider(),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const[Text('Date 21, 2022'), Text('৳1,000', style: TextStyle(fontWeight: FontWeight.bold))]),
+                const Text('How you will get paid', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 5),
+                const Text('অ্যাডমিন আপনার বেতন বা পার-ডেলিভারি টাকা এই অ্যাকাউন্টে পাঠিয়ে দিবে।', style: TextStyle(color: Colors.grey, fontSize: 13)),
                 const SizedBox(height: 25),
-                const Text('RIDER RATINGS', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)), const SizedBox(height: 10),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[const Text('Recent 5 Ratings'), Row(children: List.generate(5, (index) => const Icon(Icons.star, color: Colors.orange, size: 18)))]),
-                const SizedBox(height: 5), const Text('Common compliments: Fast | Polite', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                const SizedBox(height: 25),
-                const Text('SHOP SETTINGS', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                ListTile(contentPadding: EdgeInsets.zero, title: const Text('Payout Method'), trailing: const Icon(Icons.arrow_forward_ios, size: 15), onTap: (){}),
-                ListTile(contentPadding: EdgeInsets.zero, title: Row(children: const[Icon(Icons.account_balance, color: Colors.red), SizedBox(width: 10), Text('Link Bank Account'), SizedBox(width: 10), Icon(Icons.account_balance_wallet, color: Colors.pink), SizedBox(width: 5), Icon(Icons.account_balance_wallet_outlined, color: Colors.orange)]), trailing: const Icon(Icons.arrow_forward_ios, size: 15), onTap: (){}),
-                ListTile(contentPadding: EdgeInsets.zero, title: Row(children: const[Icon(Icons.directions_bike), SizedBox(width: 10), Text('Vehicle Info')]), trailing: const Icon(Icons.arrow_forward_ios, size: 15), onTap: (){}),
-                ListTile(contentPadding: EdgeInsets.zero, title: Row(children: const[Icon(Icons.help_outline), SizedBox(width: 10), Text('Help & Support')]), trailing: const Icon(Icons.arrow_forward_ios, size: 15), onTap: (){}),
-                const SizedBox(height: 20),
-                TextButton(onPressed: () async {await FirebaseAuth.instance.signOut(); Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));}, child: const Text('Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 18)))
+
+                const Text('Mobile Banking (MFS)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.pink)),
+                const SizedBox(height: 10),
+                TextField(controller: bkashCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'bKash Number (Personal)', prefixIcon: Icon(Icons.phone_android, color: Colors.pink), border: OutlineInputBorder())),
+                const SizedBox(height: 10),
+                TextField(controller: nagadCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Nagad Number', prefixIcon: Icon(Icons.phone_android, color: Colors.orange), border: OutlineInputBorder())),
+                
+                const SizedBox(height: 30),
+                const Text('Bank Account (Optional)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blue)),
+                const SizedBox(height: 10),
+                TextField(controller: accNameCtrl, decoration: const InputDecoration(labelText: 'Bank Name & Branch', prefixIcon: Icon(Icons.account_balance, color: Colors.blue), border: OutlineInputBorder())),
+                const SizedBox(height: 10),
+                TextField(controller: accNoCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Account Number', prefixIcon: Icon(Icons.numbers), border: OutlineInputBorder())),
+                
+                const SizedBox(height: 30),
+                SizedBox(
+                  width: double.infinity, height: 50,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                    onPressed: _savePaymentData, 
+                    icon: const Icon(Icons.save, color: Colors.white),
+                    label: const Text('SAVE INFORMATION', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                  )
+                )
               ],
             ),
           )
-        ],
-      ),
     );
   }
 }
