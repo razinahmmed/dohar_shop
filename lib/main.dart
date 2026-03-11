@@ -17,6 +17,14 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'dart:async';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'dart:math' as math;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+
 
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
@@ -1056,10 +1064,24 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         .where('selected_size', isEqualTo: selectedSize != null ? selectedSize!['name'] : '')
         .get();
 
+    String cartDocId = '';
+    int currentQty = 1;
+
     if (existingItem.docs.isNotEmpty) {
-      await cartRef.doc(existingItem.docs.first.id).update({'quantity': FieldValue.increment(1)});
+      cartDocId = existingItem.docs.first.id;
+      
+      if (isBuyNow) {
+        // [FIXED]: Buy Now দিলে কোয়ান্টিটি আর বাড়বে না। জাস্ট ১ সেট হয়ে সরাসরি চেকআউটে যাবে।
+        currentQty = 1;
+        await cartRef.doc(cartDocId).update({'quantity': 1});
+      } else {
+        // Add to Cart দিলে আগেরটার সাথে ১ যোগ হবে।
+        currentQty = (existingItem.docs.first.data() as Map<String, dynamic>)['quantity'] + 1;
+        await cartRef.doc(cartDocId).update({'quantity': FieldValue.increment(1)});
+      }
+      
     } else {
-      await cartRef.add({
+      var newDoc = await cartRef.add({
         'product_name': widget.product['product_name'],
         'price': finalPrice, 
         'original_price': data['original_price'] ?? data['price'],
@@ -1071,10 +1093,32 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         'seller_id': data.containsKey('seller_id') ? data['seller_id'] : 'unknown',
         'added_at': FieldValue.serverTimestamp(),
       });
+      cartDocId = newDoc.id;
     }
+
     if (!mounted) return;
-    if (isBuyNow) { Navigator.push(context, MaterialPageRoute(builder: (context) => const CartPage())); } 
-    else { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Item added to Cart! 🚀'), duration: Duration(seconds: 1))); }
+
+    if (isBuyNow) { 
+      // Buy Now হলে ফ্রি শিপিং এমাউন্ট চেক করে সরাসরি Checkout পেজে পাঠিয়ে দিবে
+      int freeShippingThreshold = 0;
+      try {
+        DocumentSnapshot settingsDoc = await FirebaseFirestore.instance.collection('app_config').doc('delivery_settings').get();
+        if (settingsDoc.exists) {
+          freeShippingThreshold = ((settingsDoc.data() as Map<String, dynamic>)['free_shipping_threshold'] as num?)?.toInt() ?? 0;
+        }
+      } catch (e) {}
+
+      int grandTotal = finalPrice * currentQty;
+
+      Navigator.push(context, MaterialPageRoute(builder: (context) => CheckoutPage(
+        grandTotal: grandTotal, 
+        selectedItemIds:[cartDocId], 
+        freeShippingThreshold: freeShippingThreshold
+      ))); 
+    } 
+    else { 
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Item added to Cart! 🚀'), duration: Duration(seconds: 1))); 
+    }
   }
 
   void _saveToRecentlyViewed() async {
@@ -1217,6 +1261,13 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                         if (images.length > 1) SizedBox(height: 60, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: images.length, itemBuilder: (context, index) { bool isSelected = _selectedImageIndex == index; return InkWell(onTap: () => setState(() => _selectedImageIndex = index), child: Container(margin: const EdgeInsets.only(right: 10), height: 60, width: 60, decoration: BoxDecoration(border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), borderRadius: BorderRadius.circular(8), image: DecorationImage(image: NetworkImage(images[index]), fit: BoxFit.cover)))); })),
                         const SizedBox(height: 20),
                         Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold), maxLines: 2, overflow: TextOverflow.ellipsis),
+                        // নতুন: প্রোডাক্টের SKU কোড দেখানো
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(5)),
+                          child: Text('Code: ${data['sku'] ?? 'N/A'}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87)),
+                        ),
+                        const SizedBox(height: 10),
                         const SizedBox(height: 10),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween, crossAxisAlignment: CrossAxisAlignment.end,
@@ -1733,7 +1784,7 @@ class _ShopeeHomeState extends State<ShopeeHome> {
 
                             // মূল প্রোডাক্ট স্ট্রিম (সব প্রোডাক্ট)
                             return StreamBuilder(
-                              stream: FirebaseFirestore.instance.collection('products').orderBy('timestamp', descending: true).snapshots(),
+                              stream: FirebaseFirestore.instance.collection('products').orderBy('timestamp', descending: true).limit(30).snapshots(),
                               builder: (context, AsyncSnapshot<QuerySnapshot> prodSnapshot) {
                                 if (prodSnapshot.connectionState == ConnectionState.waiting) return const Center(child: Padding(padding: EdgeInsets.all(20.0), child: CircularProgressIndicator()));
                                 if (!prodSnapshot.hasData || prodSnapshot.data!.docs.isEmpty) return const SizedBox.shrink();
@@ -2019,7 +2070,7 @@ class _UserDashboardState extends State<UserDashboard> {
 
   // ছবি আপলোডের ফাংশন
   Future<void> _uploadProfilePicture() async {
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 1080);
     if (image == null || currentUser == null) return;
 
     try {
@@ -3377,7 +3428,6 @@ class _PaymentsReportsState extends State<PaymentsReports> {
               ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
                 onPressed: () {
-                  // এখানে ফায়ারবেসে একটি 'payout_requests' কালেকশন তৈরি করা যেতে পারে
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Withdrawal request of ৳${amountCtrl.text} via $selectedMethod sent to Admin!')));
                 },
@@ -3388,6 +3438,59 @@ class _PaymentsReportsState extends State<PaymentsReports> {
         }
       )
     );
+  }
+
+  // ====================================================
+  // [NEW]: পিডিএফ রিপোর্ট তৈরি ও ডাউনলোড করার ফাংশন (যেটা মিসিং ছিল)
+  // ====================================================
+  Future<void> generateSellerMonthlyReportPDF(List<Map<String, dynamic>> history, double totalEarned) async {
+    final pdf = pw.Document();
+    
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children:[
+              pw.Text('D Shop - Seller Statement', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColors.deepOrange)),
+              pw.SizedBox(height: 10),
+              pw.Text('Generated on: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}'),
+              pw.SizedBox(height: 30),
+              
+              pw.Text('Earnings Breakdown', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 10),
+              
+              pw.Table.fromTextArray(
+                headers:['Date', 'Product Name', 'Status', 'Net Earning'],
+                data: history.map((item) {
+                  DateTime dt = (item['date'] as Timestamp).toDate();
+                  return[
+                    '${dt.day}/${dt.month}/${dt.year}',
+                    item['product_name'],
+                    item['status'],
+                    'Tk ${item['earnings'].toStringAsFixed(0)}'
+                  ];
+                }).toList(),
+                headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                headerDecoration: const pw.BoxDecoration(color: PdfColors.teal),
+                cellAlignment: pw.Alignment.centerLeft,
+              ),
+              pw.SizedBox(height: 20),
+              
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.end,
+                children:[
+                  pw.Text('Total Settled Earnings: Tk ${totalEarned.toStringAsFixed(0)}', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold))
+                ]
+              )
+            ]
+          );
+        }
+      )
+    );
+
+    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'Seller_Statement.pdf');
   }
 
   @override
@@ -3426,7 +3529,6 @@ class _PaymentsReportsState extends State<PaymentsReports> {
 
                 if (status == 'Delivered') {
                   availableBalance += netEarnings;
-                  // হিস্ট্রিতে অ্যাড করা
                   earningHistory.add({
                     'product_name': item['product_name'],
                     'earnings': netEarnings,
@@ -3436,7 +3538,6 @@ class _PaymentsReportsState extends State<PaymentsReports> {
                 } 
                 else if (status != 'Cancelled') {
                   pendingBalance += netEarnings;
-                  // হিস্ট্রিতে অ্যাড করা
                   earningHistory.add({
                     'product_name': item['product_name'],
                     'earnings': netEarnings,
@@ -3483,7 +3584,7 @@ class _PaymentsReportsState extends State<PaymentsReports> {
                     label: const Text('WITHDRAW FUNDS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
                   ),
                 ),
-                const SizedBox(height: 25), 
+                const SizedBox(height: 15), 
                 
                 // =====================================
                 // Payment Methods
@@ -3502,6 +3603,29 @@ class _PaymentsReportsState extends State<PaymentsReports> {
                 ),
                 const SizedBox(height: 25), 
 
+                // --- পিডিএফ ডাউনলোড বাটন ---
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Colors.teal),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    onPressed: () {
+                      // পিডিএফ ফাংশন কল
+                      generateSellerMonthlyReportPDF(earningHistory, availableBalance);
+                    },
+                    icon: const Icon(Icons.picture_as_pdf, color: Colors.teal),
+                    label: const Text(
+                      'DOWNLOAD MONTHLY STATEMENT',
+                      style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+
                 // =====================================
                 // Earning History (Sales Report)
                 // =====================================
@@ -3509,10 +3633,11 @@ class _PaymentsReportsState extends State<PaymentsReports> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children:[
                     const Text('Recent Earnings', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                    Text('${(platformCommissionRate * 100).toStringAsFixed(0)}% Platform Fee Deducted', style: const TextStyle(fontSize: 10, color: Colors.redAccent)),
+                    Text('${(platformCommissionRate * 100).toStringAsFixed(0)}% Platform Fee Deducted', 
+                      style: const TextStyle(fontSize: 10, color: Colors.redAccent)),
                   ],
                 ),
-                const SizedBox(height: 10), 
+                const SizedBox(height: 10),
 
                 if (earningHistory.isEmpty)
                   const Center(child: Padding(padding: EdgeInsets.all(20.0), child: Text('No earning history yet.', style: TextStyle(color: Colors.grey))))
@@ -3525,7 +3650,6 @@ class _PaymentsReportsState extends State<PaymentsReports> {
                       var item = earningHistory[index];
                       bool isCompleted = item['status'] == 'Completed';
 
-                      // Date formatting
                       String dateStr = 'Recently';
                       if (item['date'] is Timestamp) {
                         DateTime dt = (item['date'] as Timestamp).toDate();
@@ -3596,7 +3720,7 @@ class _SellerProfileState extends State<SellerProfile> {
 
   Future<void> _uploadSellerProfilePicture() async {
     User? currentUser = FirebaseAuth.instance.currentUser;
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 1080);
     if (image == null || currentUser == null) return;
 
     try {
@@ -3984,7 +4108,12 @@ class _AddProductPageState extends State<AddProductPage> {
   final ImagePicker _picker = ImagePicker();
 
   Future<void> pickImages() async {
-    final List<XFile> images = await _picker.pickMultiImage();
+    // এখানে imageQuality এবং maxWidth সেট করে দেওয়া হলো
+    final List<XFile> images = await _picker.pickMultiImage(
+      imageQuality: 70,    // 100 এর মধ্যে 70% কোয়ালিটি (সাইজ অনেক কমবে, কোয়ালিটি ভালো থাকবে)
+      maxWidth: 1080,      // সর্বোচ্চ রেজুলেশন 1080p
+      maxHeight: 1080,
+    );
     if (images.isNotEmpty) setState(() => selectedImages.addAll(images));
   }
 
@@ -4006,11 +4135,25 @@ class _AddProductPageState extends State<AddProductPage> {
       List<String> finalTags = searchTags.map((e) => e.toLowerCase()).toList();
       finalTags.add(nameController.text.trim().toLowerCase());
 
+      // নতুন: ইউনিক প্রোডাক্ট কোড (SKU) তৈরি করা হচ্ছে (যেমন: DS-8492)
+      String generateSKU = 'DS-${DateTime.now().millisecondsSinceEpoch.toString().substring(9, 13)}${math.Random().nextInt(9)}';
+
       await FirebaseFirestore.instance.collection('products').add({
-        'product_name': nameController.text.trim(), 'price': priceController.text.trim(), 'original_price': originalPriceController.text.trim(), 'stock': stockController.text.trim(),
-        'category': selectedCategory, 'description': descController.text.trim(),
-        'colors': colors, 'sizes': sizes, // Map ডাটা সেভ হচ্ছে
-        'search_tags': finalTags, 'image_urls': imageUrls, 'pdf_catalog': selectedFileName ?? "", 'seller_id': FirebaseAuth.instance.currentUser?.uid, 'timestamp': FieldValue.serverTimestamp(), 'status': 'pending',
+        'product_name': nameController.text.trim(), 
+        'price': priceController.text.trim(), 
+        'original_price': originalPriceController.text.trim(), 
+        'stock': stockController.text.trim(),
+        'category': selectedCategory, 
+        'description': descController.text.trim(),
+        'colors': colors, 
+        'sizes': sizes, 
+        'search_tags': finalTags, 
+        'image_urls': imageUrls, 
+        'pdf_catalog': selectedFileName ?? "", 
+        'seller_id': FirebaseAuth.instance.currentUser?.uid, 
+        'timestamp': FieldValue.serverTimestamp(), 
+        'status': 'pending',
+        'sku': generateSKU, // <--- এখানে ডাটাবেসে SKU সেভ করা হচ্ছে
       });
 
       if (!mounted) return;
@@ -5569,11 +5712,31 @@ class AdminFinanceReports extends StatelessWidget {
                   ), 
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start, 
-                    children:[
+                    children: [
                       const Text('Total Successful Revenue', style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold)), 
                       const SizedBox(height: 5),
                       Text('৳${totalDeliveredRevenue.toStringAsFixed(0)}', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.black)),
                       const Text('From all delivered orders', style: TextStyle(fontSize: 12, color: Colors.black54)), 
+
+                      // --- এখান থেকে আপনার নতুন বাটন শুরু ---
+                      const SizedBox(height: 15),
+                      SizedBox(
+                        width: double.infinity, 
+                        height: 50,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.teal, 
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))
+                          ),
+                          onPressed: () {
+                            Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminProfitLossReportPage()));
+                          }, 
+                          icon: const Icon(Icons.analytics, color: Colors.white), 
+                          label: const Text('VIEW MONTHLY P&L & SALARIES', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                        ),
+                      ),
+                      const SizedBox(height: 15),
+                      // --- বাটন শেষ ---
                     ]
                   )
                 ),
@@ -5710,7 +5873,7 @@ class _AdminSettingsState extends State<AdminSettings> {
 
   Future<void> _uploadAdminProfilePicture() async {
     User? currentUser = FirebaseAuth.instance.currentUser;
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 1080);
     if (image == null || currentUser == null) return;
 
     try {
@@ -6711,9 +6874,62 @@ class RiderOrderDetails extends StatelessWidget {
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(backgroundColor: Colors.green), 
                     onPressed: () async {
-                      // ডেলিভারি সম্পন্ন করার লজিক
-                      await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({'status': 'Delivered'});
-                      if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delivery marked as Completed! ✅')));
+                      // ১. লোডিং দেখানো
+                      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+                      try {
+                        // ২. রাইডারের বর্তমান লোকেশন বের করা
+                        bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+                        if (!serviceEnabled) throw 'Please enable device GPS / Location!';
+                        
+                        LocationPermission permission = await Geolocator.checkPermission();
+                        if (permission == LocationPermission.denied) {
+                          permission = await Geolocator.requestPermission();
+                          if (permission == LocationPermission.denied) throw 'Location permission denied!';
+                        }
+
+                        Position riderPosition = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+
+                        // ৩. কাস্টমারের লোকেশন চেক করা (অর্ডার প্লেস করার সময় সেভ করা Lat/Lng)
+                        double customerLat = data.containsKey('customer_lat') ? (data['customer_lat'] as num).toDouble() : 0.0;
+                        double customerLng = data.containsKey('customer_lng') ? (data['customer_lng'] as num).toDouble() : 0.0;
+
+                        // যদি কাস্টমারের লোকেশন ম্যাপে দেওয়া থাকে, তবে দূরত্ব মাপবে
+                        if (customerLat != 0.0 && customerLng != 0.0) {
+                          double distanceInMeters = Geolocator.distanceBetween(
+                            riderPosition.latitude, riderPosition.longitude, 
+                            customerLat, customerLng
+                          );
+
+                          // যদি দূরত্ব ৫০০ মিটারের বেশি হয় (অর্থাৎ রাইডার অনেক দূরে আছে)
+                          if (distanceInMeters > 500) {
+                            if (context.mounted) Navigator.pop(context); // লোডিং বন্ধ
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                              content: Text('Error: আপনি কাস্টমারের ঠিকানা থেকে ${distanceInMeters.toStringAsFixed(0)} মিটার দূরে আছেন! সঠিক জায়গায় গিয়ে কনফার্ম করুন।'),
+                              backgroundColor: Colors.red,
+                              duration: const Duration(seconds: 4),
+                            ));
+                            return; // এখানেই আটকে দিবে, ডেলিভারি হবে না
+                          }
+                        }
+
+                        // ৪. দূরত্ব ঠিক থাকলে বা কাস্টমারের লোকেশন না থাকলে ডেলিভারি সম্পন্ন করবে
+                        // এবং লগ (Log) রাখার জন্য রাইডারের বর্তমান লোকেশন ফায়ারবেসে সেভ করে রাখবে
+                        await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({
+                          'status': 'Delivered',
+                          'delivered_lat': riderPosition.latitude,   // অ্যাডমিন প্রমাণের জন্য দেখতে পারবে
+                          'delivered_lng': riderPosition.longitude,
+                          'delivered_at': FieldValue.serverTimestamp(),
+                        });
+
+                        if (context.mounted) {
+                          Navigator.pop(context); // লোডিং বন্ধ
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delivery marked as Completed! ✅'), backgroundColor: Colors.green));
+                        }
+                      } catch (e) {
+                        if (context.mounted) Navigator.pop(context);
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
+                      }
                     }, 
                     child: const Text('Mark as Delivered', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
                   )
@@ -6732,6 +6948,49 @@ class RiderOrderDetails extends StatelessWidget {
 // ==========================================
 class RiderDeliveryEarnings extends StatelessWidget {
   const RiderDeliveryEarnings({super.key});
+
+  // পিডিএফ রিপোর্ট তৈরি ও ডাউনলোড করার ফাংশন
+  Future<void> generateRiderReportPDF(List<QueryDocumentSnapshot> codOrders, double totalCash) async {
+    final pdf = pw.Document();
+    
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children:[
+              pw.Text('D Shop - Rider Collection Report', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColors.teal)),
+              pw.SizedBox(height: 10),
+              pw.Text('Generated on: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}'),
+              pw.SizedBox(height: 30),
+              
+              pw.Text('Total COD Collected: Tk ${totalCash.toStringAsFixed(0)}', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+              pw.Text('Total Deliveries: ${codOrders.length}'),
+              pw.SizedBox(height: 20),
+              
+              pw.Table.fromTextArray(
+                headers:['Order ID', 'Customer Name', 'Amount Collected'],
+                data: codOrders.map((doc) {
+                  var data = doc.data() as Map<String, dynamic>;
+                  return[
+                    '#${doc.id.substring(0, 8).toUpperCase()}',
+                    data['shipping_name'] ?? 'Unknown',
+                    'Tk ${data['total_amount']}'
+                  ];
+                }).toList(),
+                headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                headerDecoration: const pw.BoxDecoration(color: PdfColors.deepOrange),
+                cellAlignment: pw.Alignment.centerLeft,
+              ),
+            ]
+          );
+        }
+      )
+    );
+
+    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'Rider_Report.pdf');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -6816,6 +7075,8 @@ class RiderDeliveryEarnings extends StatelessWidget {
                   ),
 
                 const SizedBox(height: 20),
+                
+                // Settlement Button
                 SizedBox(
                   width: double.infinity, height: 50, 
                   child: ElevatedButton(
@@ -6825,7 +7086,23 @@ class RiderDeliveryEarnings extends StatelessWidget {
                     } : null, 
                     child: const Text('Request Settlement', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
                   )
+                ),
+
+                const SizedBox(height: 10),
+                
+                // PDF Download Button (New)
+                SizedBox(
+                  width: double.infinity, height: 50, 
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(foregroundColor: Colors.teal, side: const BorderSide(color: Colors.teal)), 
+                    onPressed: codOrders.isNotEmpty ? () {
+                      generateRiderReportPDF(codOrders, totalCashCollected);
+                    } : null, 
+                    icon: const Icon(Icons.picture_as_pdf),
+                    label: const Text('DOWNLOAD REPORT (PDF)', style: TextStyle(fontWeight: FontWeight.bold))
+                  )
                 )
+
               ],
             ),
           );
@@ -6851,7 +7128,7 @@ class _RiderProfileState extends State<RiderProfile> {
   // প্রোফাইল ছবি আপলোড
   Future<void> _uploadRiderProfilePicture() async {
     User? currentUser = FirebaseAuth.instance.currentUser;
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 1080);
     if (image == null || currentUser == null) return;
 
     try {
@@ -7722,6 +7999,112 @@ class _AddressListPageState extends State<AddressListPage> {
 class OrderHistoryPage extends StatelessWidget {
   const OrderHistoryPage({super.key});
 
+  // ইনভয়েস পিডিএফ তৈরি ও প্রিন্ট করার ফাংশন
+  Future<void> generateAndPrintInvoice(Map<String, dynamic> data, String orderId) async {
+    final pdf = pw.Document();
+
+    // তারিখ ঠিক করা
+    String dateString = 'Unknown Date';
+    if (data['order_date'] != null) {
+      DateTime date = (data['order_date'] as Timestamp).toDate();
+      dateString = '${date.day}/${date.month}/${date.year}';
+    }
+
+    List<dynamic> items = data['items'] ??[];
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children:[
+              // হেডার (দোকানের নাম ও টাইটেল)
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children:[
+                  pw.Text('D Shop', style: pw.TextStyle(fontSize: 30, fontWeight: pw.FontWeight.bold, color: PdfColors.deepOrange)),
+                  pw.Text('INVOICE', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold)),
+                ],
+              ),
+              pw.SizedBox(height: 30),
+
+              // অর্ডার এবং কাস্টমারের তথ্য
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children:[
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children:[
+                      pw.Text('Order ID: #${orderId.substring(0, 8).toUpperCase()}', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.SizedBox(height: 5),
+                      pw.Text('Date: $dateString'),
+                      pw.SizedBox(height: 5),
+                      pw.Text('Payment: ${data['payment_method'] ?? 'COD'}'),
+                    ],
+                  ),
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.end,
+                    children:[
+                      pw.Text('Billed To:', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.SizedBox(height: 5),
+                      pw.Text(data['shipping_name'] ?? 'Customer'),
+                      pw.Text(data['shipping_phone'] ?? ''),
+                    ],
+                  ),
+                ],
+              ),
+              pw.SizedBox(height: 30),
+
+              // প্রোডাক্টের লিস্ট (টেবিল)
+              pw.Table.fromTextArray(
+                headers:['Item Description', 'Qty', 'Unit Price', 'Total'],
+                data: items.map((item) {
+                  int qty = int.tryParse(item['quantity'].toString()) ?? 1;
+                  double price = double.tryParse(item['price'].toString()) ?? 0.0;
+                  return [
+                    item['product_name'].toString(),
+                    qty.toString(),
+                    'Tk ${price.toStringAsFixed(0)}',
+                    'Tk ${(qty * price).toStringAsFixed(0)}'
+                  ];
+                }).toList(),
+                headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                headerDecoration: const pw.BoxDecoration(color: PdfColors.teal),
+                cellAlignment: pw.Alignment.centerLeft,
+                cellPadding: const pw.EdgeInsets.all(8),
+              ),
+              pw.SizedBox(height: 20),
+
+              // সর্বমোট টাকার হিসাব
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.end,
+                children:[
+                  pw.Text(
+                    'Grand Total: Tk ${data['total_amount']}', 
+                    style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: PdfColors.deepOrange)
+                  ),
+                ],
+              ),
+
+              pw.SizedBox(height: 50),
+              pw.Divider(),
+              pw.Center(
+                child: pw.Text('Thank you for shopping with D Shop!', style: pw.TextStyle(fontSize: 12, fontStyle: pw.FontStyle.italic))
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    // পিডিএফ প্রিভিউ ও সেভ/প্রিন্ট অপশন চালু করা
+    await Printing.layoutPdf(
+      onLayout: (PdfPageFormat format) async => pdf.save(),
+      name: 'Invoice_${orderId.substring(0, 8)}.pdf',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     User? user = FirebaseAuth.instance.currentUser;
@@ -7861,12 +8244,31 @@ class OrderHistoryPage extends StatelessWidget {
                 
                 const Divider(height: 20),
                 
-                // ফুটার (Total Amount)
+                // ফুটার (Total Amount এবং Invoice Button)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children:[
-                    const Text('Total Amount', style: TextStyle(fontWeight: FontWeight.bold)),
-                    Text('৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 16)),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children:[
+                        const Text('Total Amount', style: TextStyle(fontWeight: FontWeight.bold)),
+                        Text('৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 16)),
+                      ],
+                    ),
+                    
+                    // নতুন: ইনভয়েস ডাউনলোড বাটন
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.teal,
+                        side: const BorderSide(color: Colors.teal),
+                      ),
+                      icon: const Icon(Icons.receipt_long, size: 16),
+                      label: const Text('Invoice'),
+                      onPressed: () {
+                        // ইনভয়েস ফাংশন কল করা হচ্ছে
+                        generateAndPrintInvoice(data, order.id);
+                      },
+                    )
                   ],
                 ),
               ],
@@ -8013,7 +8415,7 @@ class _AdminBannerManagementPageState extends State<AdminBannerManagementPage> {
 
   // একসাথে একাধিক ব্যানার আপলোড করার ফাংশন
   Future<void> uploadMultipleBanners() async {
-    final List<XFile> images = await _picker.pickMultiImage(); // একাধিক ছবি সিলেক্ট 
+    final List<XFile> images = await _picker.pickMultiImage(imageQuality: 70, maxWidth: 1080);// একাধিক ছবি সিলেক্ট 
     if (images.isEmpty) return;
 
     setState(() => _isUploading = true);
@@ -8821,7 +9223,7 @@ class _ShopPageState extends State<ShopPage> {
 
   // দোকানের ব্যানার আপলোড করার ফাংশন
   Future<void> _uploadShopBanner() async {
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 1080);
     if (image == null) return;
 
     try {
@@ -9181,6 +9583,243 @@ class CustomerNotificationPage extends StatelessWidget {
             },
           );
         },
+      ),
+    );
+  }
+}
+
+// ==========================================
+// অ্যাডমিন পেজ: Monthly Profit & Loss (P&L) ও Expense Tracker
+// ==========================================
+class AdminProfitLossReportPage extends StatefulWidget {
+  const AdminProfitLossReportPage({super.key});
+
+  @override
+  State<AdminProfitLossReportPage> createState() => _AdminProfitLossReportPageState();
+}
+
+class _AdminProfitLossReportPageState extends State<AdminProfitLossReportPage> {
+  final TextEditingController amountCtrl = TextEditingController();
+  final TextEditingController descCtrl = TextEditingController();
+  String selectedCategory = 'Staff Salary';
+  double platformCommissionRate = 0.10; // ১০% কমিশন
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchCommissionRate();
+  }
+
+  Future<void> _fetchCommissionRate() async {
+    try {
+      var doc = await FirebaseFirestore.instance.collection('app_config').doc('finance_settings').get();
+      if (doc.exists) {
+        setState(() {
+          platformCommissionRate = ((doc.data()?['platform_commission'] ?? 10) as num).toDouble() / 100;
+        });
+      }
+    } catch (e) {}
+  }
+
+  // নতুন খরচ বা স্টাফের বেতন এন্ট্রি করার ফাংশন
+  void _addExpense() {
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Add Expense / Salary'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children:[
+                DropdownButtonFormField<String>(
+                  value: selectedCategory,
+                  decoration: const InputDecoration(labelText: 'Expense Category', border: OutlineInputBorder(), isDense: true),
+                  items:['Staff Salary', 'Rider Payment', 'Server/API Cost', 'Marketing', 'Others']
+                      .map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
+                  onChanged: (val) => setDialogState(() => selectedCategory = val!),
+                ),
+                const SizedBox(height: 15),
+                TextField(
+                  controller: amountCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Amount (৳)', border: OutlineInputBorder(), isDense: true),
+                ),
+                const SizedBox(height: 15),
+                TextField(
+                  controller: descCtrl,
+                  decoration: const InputDecoration(labelText: 'Description (e.g. Rahim Salary Mar 2026)', border: OutlineInputBorder(), isDense: true),
+                ),
+              ],
+            ),
+            actions:[
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () async {
+                  if (amountCtrl.text.isEmpty || descCtrl.text.isEmpty) return;
+                  
+                  await FirebaseFirestore.instance.collection('expenses').add({
+                    'category': selectedCategory,
+                    'amount': double.parse(amountCtrl.text.trim()),
+                    'description': descCtrl.text.trim(),
+                    'date': FieldValue.serverTimestamp(),
+                  });
+                  
+                  amountCtrl.clear(); descCtrl.clear();
+                  if (mounted) Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Expense Added Successfully!')));
+                },
+                child: const Text('Add Expense', style: TextStyle(color: Colors.white)),
+              )
+            ],
+          );
+        }
+      )
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    DateTime now = DateTime.now();
+    
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(title: const Text('Monthly P&L Report'), backgroundColor: Colors.teal, foregroundColor: Colors.white),
+      body: StreamBuilder<QuerySnapshot>(
+        // এই মাসের সমস্ত অর্ডার
+        stream: FirebaseFirestore.instance.collection('orders').snapshots(),
+        builder: (context, orderSnapshot) {
+          return StreamBuilder<QuerySnapshot>(
+            // এই মাসের সমস্ত খরচ
+            stream: FirebaseFirestore.instance.collection('expenses').snapshots(),
+            builder: (context, expenseSnapshot) {
+              
+              if (orderSnapshot.connectionState == ConnectionState.waiting || expenseSnapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              double totalIncome = 0; // অ্যাডমিনের কমিশন থেকে আয়
+              double totalExpense = 0; // অ্যাডমিনের মোট খরচ
+
+              // ১. আয় হিসাব করা (শুধু এই মাসের Delivered অর্ডার থেকে কমিশন)
+              if (orderSnapshot.hasData) {
+                for (var doc in orderSnapshot.data!.docs) {
+                  var data = doc.data() as Map<String, dynamic>;
+                  if (data['status'] == 'Delivered' && data['order_date'] != null) {
+                    DateTime orderDate = (data['order_date'] as Timestamp).toDate();
+                    if (orderDate.month == now.month && orderDate.year == now.year) {
+                      List<dynamic> items = data['items'] ??[];
+                      for (var item in items) {
+                        double price = double.tryParse(item['price'].toString()) ?? 0;
+                        int qty = int.tryParse(item['quantity'].toString()) ?? 1;
+                        // অ্যাডমিনের লাভ = প্রোডাক্টের দামের ওপর ১০% (বা আপনার সেট করা রেট)
+                        totalIncome += (price * qty) * platformCommissionRate; 
+                      }
+                    }
+                  }
+                }
+              }
+
+              // ২. খরচ হিসাব করা (শুধু এই মাসের)
+              List<QueryDocumentSnapshot> thisMonthExpenses =[];
+              if (expenseSnapshot.hasData) {
+                for (var doc in expenseSnapshot.data!.docs) {
+                  var data = doc.data() as Map<String, dynamic>;
+                  if (data['date'] != null) {
+                    DateTime expDate = (data['date'] as Timestamp).toDate();
+                    if (expDate.month == now.month && expDate.year == now.year) {
+                      totalExpense += (data['amount'] as num).toDouble();
+                      thisMonthExpenses.add(doc);
+                    }
+                  }
+                }
+              }
+
+              double netProfit = totalIncome - totalExpense;
+
+              return ListView(
+                padding: const EdgeInsets.all(15),
+                children:[
+                  Text('Report for: ${now.month}/${now.year}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.grey)),
+                  const SizedBox(height: 15),
+
+                  // Profit & Loss Cards
+                  Row(
+                    children:[
+                      _buildSummaryCard('Total Income', totalIncome, Colors.green),
+                      const SizedBox(width: 10),
+                      _buildSummaryCard('Total Expenses', totalExpense, Colors.red),
+                    ],
+                  ),
+                  const SizedBox(height: 15),
+                  Container(
+                    width: double.infinity, padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: netProfit >= 0 ? Colors.teal.shade800 : Colors.red.shade800,
+                      borderRadius: BorderRadius.circular(15)
+                    ),
+                    child: Column(
+                      children:[
+                        const Text('NET PROFIT / LOSS', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 5),
+                        Text('৳${netProfit.toStringAsFixed(0)}', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 30),
+
+                  // Expense List
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children:[
+                      const Text('Expense & Salary History', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                        onPressed: _addExpense, 
+                        icon: const Icon(Icons.add, color: Colors.white, size: 16),
+                        label: const Text('Add', style: TextStyle(color: Colors.white))
+                      )
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+
+                  if (thisMonthExpenses.isEmpty)
+                    const Center(child: Padding(padding: EdgeInsets.all(20), child: Text('No expenses recorded this month.')))
+                  else
+                    ...thisMonthExpenses.map((doc) {
+                      var data = doc.data() as Map<String, dynamic>;
+                      DateTime dt = (data['date'] as Timestamp).toDate();
+                      return Card(
+                        child: ListTile(
+                          leading: const CircleAvatar(backgroundColor: Colors.redAccent, child: Icon(Icons.money_off, color: Colors.white)),
+                          title: Text(data['description'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text('${data['category']} • ${dt.day}/${dt.month}/${dt.year}', style: const TextStyle(fontSize: 12)),
+                          trailing: Text('- ৳${data['amount']}', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+                        ),
+                      );
+                    }).toList()
+                ],
+              );
+            }
+          );
+        }
+      ),
+    );
+  }
+
+  Widget _buildSummaryCard(String title, double amount, Color color) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(15),
+        decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(10), border: Border.all(color: color.withOpacity(0.3))),
+        child: Column(
+          children:[
+            Text(title, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 5),
+            Text('৳${amount.toStringAsFixed(0)}', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color)),
+          ],
+        ),
       ),
     );
   }

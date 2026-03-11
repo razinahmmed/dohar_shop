@@ -47,6 +47,8 @@ dependencies:
   url_launcher: ^6.3.2
   shared_preferences: ^2.5.4
   firebase_messaging: ^16.1.2
+  pdf: ^3.11.3
+  printing: ^5.14.2
 
 dev_dependencies:
   flutter_test:
