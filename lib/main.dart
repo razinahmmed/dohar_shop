@@ -1093,7 +1093,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
 }
 
 // ==========================================
-// ৩ নম্বর পেজ: Product Details (Dynamic Admin Phone, Call, WhatsApp & IMO integration)
+// ৩ নম্বর পেজ: Product Details (Inline Variant Error & Auto Scroll)
 // ==========================================
 class ProductDetailsPage extends StatefulWidget {
   final QueryDocumentSnapshot product; 
@@ -1106,24 +1106,24 @@ class ProductDetailsPage extends StatefulWidget {
 class _ProductDetailsPageState extends State<ProductDetailsPage> {
   final GlobalKey _cartKey = GlobalKey();
   final GlobalKey _imageKey = GlobalKey();
+  final GlobalKey _variantKey = GlobalKey(); 
+  
   int _selectedImageIndex = 0; 
-  final GlobalKey _variantKey = GlobalKey(); // <--- অটো স্ক্রলের চাবি
   bool _isDescExpanded = false; 
+  bool _hasVariantError = false; // [NEW] পপ-আপের বদলে ইনলাইন এরর দেখানোর জন্য
   
   Map<String, dynamic>? selectedColor;
   Map<String, dynamic>? selectedSize;
 
-  // ডিফল্ট নাম্বার, তবে এটি অ্যাডমিন প্যানেল থেকে অটো আপডেট হবে
   String adminPhoneNumber = "01700000000"; 
 
   @override
   void initState() {
     super.initState();
     _saveToRecentlyViewed(); 
-    _fetchAdminPhoneNumber(); // পেজ লোড হলেই অ্যাডমিনের নাম্বার নিয়ে আসবে
+    _fetchAdminPhoneNumber(); 
   }
 
-  // অ্যাডমিন প্যানেল থেকে রিয়েল নাম্বার নিয়ে আসার ফাংশন
   Future<void> _fetchAdminPhoneNumber() async {
     try {
       var doc = await FirebaseFirestore.instance.collection('app_config').doc('store_details').get();
@@ -1132,12 +1132,9 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
           adminPhoneNumber = doc['support_phone'] ?? "01700000000";
         });
       }
-    } catch (e) {
-      // Error handling
-    }
+    } catch (e) {}
   }
 
-  // জাদুকরী Fly to Cart এনিমেশন ফাংশন
   void runAddToCartAnimation(String imageUrl) {
     if (imageUrl.isEmpty) return;
     RenderBox? imageBox = _imageKey.currentContext?.findRenderObject() as RenderBox?;
@@ -1176,8 +1173,48 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
 
   void addToCart(BuildContext context, String imageUrl, int finalPrice, int maxStock, {bool isBuyNow = false}) async {
     User? user = FirebaseAuth.instance.currentUser;
+    
     if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please login to add items to your cart!')));
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          contentPadding: const EdgeInsets.all(20),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              const Icon(Icons.lock_outline, size: 60, color: Colors.deepOrange),
+              const SizedBox(height: 15),
+              const Text('লগিন প্রয়োজন!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              const Text('অর্ডার করতে বা কার্টে অ্যাড করতে দয়া করে লগিন করুন।', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
+              const SizedBox(height: 25),
+              Row(
+                children:[
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.grey), padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () => Navigator.pop(context), 
+                      child: const Text('Skip', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))
+                    )
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                      }, 
+                      child: const Text('Login Now', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                    )
+                  ),
+                ]
+              )
+            ],
+          ),
+        )
+      );
       return; 
     }
 
@@ -1185,29 +1222,19 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     List<dynamic> colors = data.containsKey('colors') ? data['colors'] :[];
     List<dynamic> sizes = data.containsKey('sizes') ? data['sizes'] :[];
 
+    // =====================================
+    // [FIXED] পপ-আপ রিমুভ করে ইনলাইন টেক্সট এনিমেশন দেওয়া হলো
+    // =====================================
     if ((colors.isNotEmpty && selectedColor == null) || (sizes.isNotEmpty && selectedSize == null)) { 
-      // alignment: 0.5 এর কারণে এটি পেজের ঠিক মাঝখানে এসে থামবে
       if (_variantKey.currentContext != null) {
-        Scrollable.ensureVisible(
-          _variantKey.currentContext!, 
-          alignment: 0.5, // <--- ম্যাজিক! পেজের মাঝখানে আনবে
-          duration: const Duration(milliseconds: 500), 
-          curve: Curves.easeInOut
-        );
+        Scrollable.ensureVisible(_variantKey.currentContext!, alignment: 0.5, duration: const Duration(milliseconds: 500), curve: Curves.easeInOut);
       }
       
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Row(
-          children:[
-            Icon(Icons.warning_amber_rounded, color: Colors.white),
-            SizedBox(width: 10),
-            Text('দয়া করে কালার এবং সাইজ সিলেক্ট করুন!', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-          ],
-        ),
-        backgroundColor: Colors.redAccent,
-        behavior: SnackBarBehavior.floating,
-        margin: EdgeInsets.all(20),
-      ));
+      setState(() => _hasVariantError = true);
+      // ৩ সেকেন্ড পর লাল দাগ এবং টেক্সট চলে যাবে
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _hasVariantError = false);
+      });
       return; 
     }
 
@@ -1408,96 +1435,29 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                         
                         Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold), maxLines: 2, overflow: TextOverflow.ellipsis),
                         
-                        // =====================================
-                        //[NEW]: Call / WhatsApp / IMO Section
-                        // =====================================
                         const SizedBox(height: 15),
                         Container(
                           padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.green.shade50,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: Colors.green.shade200)
-                          ),
+                          decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.green.shade200)),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children:[
-                              const Text('সহজে অর্ডার করতে কল বা মেসেজ করুন:', style: TextStyle(fontSize: 16, color: Colors.green, fontWeight: FontWeight.bold)),
+                              const Text('সহজে অর্ডার করতে কল বা মেসেজ করুন:', style: TextStyle(fontSize: 13, color: Colors.green, fontWeight: FontWeight.bold)),
                               const SizedBox(height: 10),
                               Row(
                                 children:[
-                                  // Product Code
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.grey.shade300)),
-                                    child: Text('Code: $productCode', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87)),
-                                  ),
+                                  Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.grey.shade300)), child: Text('Code: $productCode', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87))),
                                   const Spacer(),
-                                  
-                                  // Phone Call Button
-                                  InkWell(
-                                    onTap: () async {
-                                      final Uri url = Uri.parse('tel:$adminPhoneNumber'); 
-                                      if (await canLaunchUrl(url)) await launchUrl(url);
-                                    },
-                                    child: Container(
-                                      width: 32, height: 32,
-                                      decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle),
-                                      child: const Icon(Icons.call, size: 18, color: Colors.white),
-                                    ),
-                                  ),
+                                  InkWell(onTap: () async { final Uri url = Uri.parse('tel:$adminPhoneNumber'); if (await canLaunchUrl(url)) await launchUrl(url); }, child: Container(width: 32, height: 32, decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle), child: const Icon(Icons.call, size: 18, color: Colors.white))),
                                   const SizedBox(width: 10),
-
-                                  // WhatsApp Button (Direct Web URL with Message)
-                                  InkWell(
-                                    onTap: () async {
-                                      String msg = "হ্যালো, আমি এই প্রোডাক্টটি অর্ডার করতে চাই।\nপ্রোডাক্ট কোড: $productCode\nনাম: ${data['product_name']}";
-                                      String formattedPhone = adminPhoneNumber;
-                                      // হোয়াটসঅ্যাপের জন্য দেশের কোড থাকা লাগে
-                                      if (formattedPhone.startsWith('0')) {
-                                        formattedPhone = '+88$formattedPhone';
-                                      }
-                                      final Uri waUrl = Uri.parse("https://wa.me/${formattedPhone.replaceAll('+', '')}?text=${Uri.encodeComponent(msg)}");
-                                      if (await canLaunchUrl(waUrl)) {
-                                        await launchUrl(waUrl, mode: LaunchMode.externalApplication);
-                                      } else {
-                                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('WhatsApp ওপেন করা যাচ্ছে না!')));
-                                      }
-                                    },
-                                    child: Image.network('https://img.icons8.com/color/512/whatsapp--v1.png', width: 43, height: 43),
-                                  ),
+                                  InkWell(onTap: () async { String msg = "হ্যালো, আমি এই প্রোডাক্টটি অর্ডার করতে চাই।\nপ্রোডাক্ট কোড: $productCode\nনাম: ${data['product_name']}"; String formattedPhone = adminPhoneNumber.startsWith('0') ? '+88$adminPhoneNumber' : adminPhoneNumber; final Uri waUrl = Uri.parse("https://wa.me/${formattedPhone.replaceAll('+', '')}?text=${Uri.encodeComponent(msg)}"); if (await canLaunchUrl(waUrl)) { await launchUrl(waUrl, mode: LaunchMode.externalApplication); }}, child: ClipOval(child: Image.network('https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/WhatsApp_icon.png/640px-WhatsApp_icon.png', width: 32, height: 32, fit: BoxFit.cover))),
                                   const SizedBox(width: 10),
-
-                                  // IMO Button (Copy to Clipboard)
-                                  InkWell(
-                                    onTap: () async {
-                                      // নাম্বার কপি করা হলো
-                                      await Clipboard.setData(ClipboardData(text: adminPhoneNumber));
-                                      if (mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                                          content: Text('অফিস নাম্বার ($adminPhoneNumber) কপি হয়েছে! ইমুতে গিয়ে মেসেজ দিন।'),
-                                          duration: const Duration(seconds: 4),
-                                          backgroundColor: Colors.blue,
-                                        ));
-                                      }
-                                    },
-                                    child: Image.network(
-                                      'https://img.icons8.com/color/512/imo.png', 
-                                      width: 32, height: 32,
-                                      // যদি ইমেজ লোড না হয়, তাহলে নীল গোল আইকন দেখাবে
-                                      errorBuilder: (context, error, stackTrace) => Container(
-                                        width: 32, height: 32, 
-                                        decoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle), 
-                                        child: const Center(child: Text('IMO', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)))
-                                      )
-                                    ),
-                                  ),
+                                  InkWell(onTap: () async { await Clipboard.setData(ClipboardData(text: adminPhoneNumber)); if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('অফিস নাম্বার ($adminPhoneNumber) কপি হয়েছে! ইমুতে গিয়ে মেসেজ দিন।'), backgroundColor: Colors.blue)); }, child: ClipOval(child: Image.network('https://play-lh.googleusercontent.com/Z42T401B7M_oQ3-dC3o7mNl6I1k3E280U0WfJIfy8uT-PZt1nE17s22pTioz_L8v0Q=w240-h240-rw', width: 32, height: 32, fit: BoxFit.cover, errorBuilder: (context, error, stackTrace) => Container(width: 32, height: 32, decoration: const BoxDecoration(color: Color(0xFF00A2FF), shape: BoxShape.circle), child: const Center(child: Text('imo', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold))))))),
                                 ],
                               ),
                             ]
                           )
                         ),
-                        // =====================================
 
                         const SizedBox(height: 15),
                         Row(
@@ -1532,13 +1492,37 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                   ),
                   const SizedBox(height: 10), 
                   
-                  // ভেরিয়েন্ট সিলেকশন (কালার এবং সাইজ)
-                  Container(
-                    key: _variantKey, // <--- এই চাবিটি এখানে বসাতে হবে
-                    width: double.infinity, color: Colors.white, padding: const EdgeInsets.all(15),
+                  // =====================================
+                  // ভেরিয়েন্ট সিলেকশন (Inline Error Text + Animated Border)
+                  // =====================================
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 400),
+                    key: _variantKey, 
+                    width: double.infinity, 
+                    padding: const EdgeInsets.all(15),
+                    decoration: BoxDecoration(
+                      color: _hasVariantError ? Colors.red.shade50 : Colors.white,
+                      border: Border.all(color: _hasVariantError ? Colors.red.shade300 : Colors.transparent, width: 1.5),
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children:[
+                        // ইনলাইন টেক্সট (মাঝে লাল লেখা আসবে যদি ভুল করে)
+                        if (_hasVariantError)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 15),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: const[
+                                Icon(Icons.arrow_downward, color: Colors.red, size: 18),
+                                SizedBox(width: 5),
+                                Text('দয়া করে সাইজ ও কালার সিলেক্ট করুন', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+                                SizedBox(width: 5),
+                                Icon(Icons.arrow_downward, color: Colors.red, size: 18),
+                              ],
+                            ),
+                          ),
+
                         if(colors.isNotEmpty) ...[
                           const Text('Colors', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10), 
                           Wrap(spacing: 10, children: colors.map((c) {
@@ -1670,11 +1654,10 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                               stream: FirebaseFirestore.instance.collection('products')
                                   .where('seller_id', isEqualTo: data['seller_id'])
                                   .where('status', isEqualTo: 'approved')
-                                  .limit(10) // সর্বোচ্চ ১০টি আনবে
+                                  .limit(10)
                                   .snapshots(),
                               builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
                                  if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-                                 // এই সেম প্রোডাক্টটি লিস্ট থেকে বাদ দেওয়া
                                  var docs = snapshot.data!.docs.where((d) => d.id != widget.product.id).toList();
                                  if (docs.isEmpty) return const Text('No other products from this shop.', style: TextStyle(color: Colors.grey));
                                  
@@ -1712,7 +1695,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                                
                                return GridView.builder(
                                  shrinkWrap: true,
-                                 physics: const NeverScrollableScrollPhysics(), // স্ক্রল অফ করা, যাতে মেইন পেজ স্ক্রল হয়
+                                 physics: const NeverScrollableScrollPhysics(), 
                                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                                    crossAxisCount: 2, childAspectRatio: 0.70, crossAxisSpacing: 10, mainAxisSpacing: 10
                                  ),
@@ -4426,37 +4409,61 @@ class _SellerPaymentInfoPageState extends State<SellerPaymentInfoPage> {
 }
 
 // ==========================================
-// সেলার Add Product পেজ (Variant Pricing সহ)
+// সেলার Add Product পেজ (Pro Matrix Variant System)
 // ==========================================
 class AddProductPage extends StatefulWidget { const AddProductPage({super.key}); @override State<AddProductPage> createState() => _AddProductPageState(); }
 class _AddProductPageState extends State<AddProductPage> {
-  final nameController = TextEditingController(); final priceController = TextEditingController(); final originalPriceController = TextEditingController(); final stockController = TextEditingController(); final descController = TextEditingController(); 
+  final nameController = TextEditingController(); 
+  final priceController = TextEditingController(); 
+  final originalPriceController = TextEditingController(); 
+  final stockController = TextEditingController(); 
+  final descController = TextEditingController(); 
   final tagInput = TextEditingController(); 
   
-  // ভেরিয়েন্ট কন্ট্রোলার
-  final colorNameInput = TextEditingController(); final colorPriceInput = TextEditingController();
-  final sizeNameInput = TextEditingController(); final sizePriceInput = TextEditingController();
-
-  String? selectedCategory; List<XFile> selectedImages =[]; String? selectedFileName; 
-  // এখন লিস্টগুলো Map আকারে সেভ হবে (নাম এবং দাম)
-  List<Map<String, dynamic>> colors = []; 
-  List<Map<String, dynamic>> sizes =[]; 
+  String? selectedCategory; 
+  List<XFile> selectedImages =[]; 
+  String? selectedFileName; 
   List<String> searchTags =[]; 
   final ImagePicker _picker = ImagePicker();
 
+  // =====================================
+  // New Pro Variant System Variables
+  // =====================================
+  String _selectedUnit = 'KG';
+  final List<String> availableUnits =['KG', 'Gram', 'Liter', 'ML', 'Piece', 'Inch', 'Size (S/M/L)'];
+  final List<String> availableColors =['Black', 'White', 'Red', 'Blue', 'Green', 'Yellow', 'Pink', 'Purple', 'Orange', 'Grey', 'Mixed', 'No Color'];
+
+  // এই লিস্টটি আপনার দেওয়া লজিক অনুযায়ী ডাটা ধরে রাখবে
+  // স্ট্রাকচার: [ { size: "1", colors:[ {name: "Red", price: 30}, ... ] }, ... ]
+  List<Map<String, dynamic>> variantGroups =[];
+
+  @override
+  void initState() {
+    super.initState();
+    // পেজ ওপেন হলেই ডিফল্টভাবে একটি খালি সাইজ ও কালার বক্স দেখাবে
+    variantGroups.add({
+      'size': '',
+      'colors': [{'name': 'Black', 'price': 0}]
+    });
+  }
+
   Future<void> pickImages() async {
-    // এখানে imageQuality এবং maxWidth সেট করে দেওয়া হলো
-    final List<XFile> images = await _picker.pickMultiImage(
-      imageQuality: 70,    // 100 এর মধ্যে 70% কোয়ালিটি (সাইজ অনেক কমবে, কোয়ালিটি ভালো থাকবে)
-      maxWidth: 1080,      // সর্বোচ্চ রেজুলেশন 1080p
-      maxHeight: 1080,
-    );
+    final List<XFile> images = await _picker.pickMultiImage(imageQuality: 70, maxWidth: 1080);
     if (images.isNotEmpty) setState(() => selectedImages.addAll(images));
   }
 
   void uploadProduct() async {
-    if (nameController.text.isEmpty || priceController.text.isEmpty || selectedCategory == null) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please fill Name, Price and Category!'))); return; }
-    if (tagInput.text.trim().isNotEmpty) { var tags = tagInput.text.split(','); for (var t in tags) { if (t.trim().isNotEmpty) searchTags.add(t.trim()); } tagInput.clear(); }
+    if (nameController.text.isEmpty || priceController.text.isEmpty || selectedCategory == null) { 
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please fill Name, Price and Category!'))); 
+      return; 
+    }
+    
+    if (tagInput.text.trim().isNotEmpty) { 
+      var tags = tagInput.text.split(','); 
+      for (var t in tags) { if (t.trim().isNotEmpty) searchTags.add(t.trim()); } 
+      tagInput.clear(); 
+    }
+
     try {
       showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
       
@@ -4464,17 +4471,24 @@ class _AddProductPageState extends State<AddProductPage> {
       for (var image in selectedImages) {
         String fileName = '${DateTime.now().millisecondsSinceEpoch}_${image.name}';
         Reference ref = FirebaseStorage.instance.ref().child('product_images').child(fileName);
-        if (kIsWeb) { Uint8List bytes = await image.readAsBytes(); await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg')); } 
-        else { await ref.putFile(File(image.path)); }
+        if (kIsWeb) { 
+          Uint8List bytes = await image.readAsBytes(); 
+          await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg')); 
+        } else { 
+          await ref.putFile(File(image.path)); 
+        }
         imageUrls.add(await ref.getDownloadURL());
       }
 
       List<String> finalTags = searchTags.map((e) => e.toLowerCase()).toList();
       finalTags.add(nameController.text.trim().toLowerCase());
 
-      // নতুন: ইউনিক প্রোডাক্ট কোড (SKU) তৈরি করা হচ্ছে (যেমন: DS-8492)
       String generateSKU = 'DS-${DateTime.now().millisecondsSinceEpoch.toString().substring(9, 13)}${math.Random().nextInt(9)}';
 
+      // =====================================
+      // Data Formatting for Database
+      // =====================================
+      // নতুন স্ট্রাকচারটি ডাটাবেসে সেভ করার জন্য রেডি করা হচ্ছে
       await FirebaseFirestore.instance.collection('products').add({
         'product_name': nameController.text.trim(), 
         'price': priceController.text.trim(), 
@@ -4482,47 +4496,200 @@ class _AddProductPageState extends State<AddProductPage> {
         'stock': stockController.text.trim(),
         'category': selectedCategory, 
         'description': descController.text.trim(),
-        'colors': colors, 
-        'sizes': sizes, 
         'search_tags': finalTags, 
         'image_urls': imageUrls, 
-        'pdf_catalog': selectedFileName ?? "", 
         'seller_id': FirebaseAuth.instance.currentUser?.uid, 
         'timestamp': FieldValue.serverTimestamp(), 
         'status': 'pending',
-        'sku': generateSKU, // <--- এখানে ডাটাবেসে SKU সেভ করা হচ্ছে
+        'sku': generateSKU,
+        'variant_unit': _selectedUnit,         // একক (যেমন: KG)
+        'variants': variantGroups,             // আপনার বানানো প্রো-লজিক ডাটা
       });
 
       if (!mounted) return;
-      Navigator.pop(context); Navigator.pop(context); 
+      Navigator.pop(context); 
+      Navigator.pop(context); 
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product Uploaded Successfully! 🎉')));
-    } catch (e) { Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'))); }
+    } catch (e) { 
+      Navigator.pop(context); 
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'))); 
+    }
   }
 
-  // নতুন অ্যাডভান্সড ভেরিয়েন্ট ইনপুট (নাম এবং দাম)
-  Widget _buildAdvancedVariantInput(String title, TextEditingController nameCtrl, TextEditingController priceCtrl, List<Map<String, dynamic>> list) {
-    void addItems() {
-      if (nameCtrl.text.trim().isNotEmpty) {
-        setState(() { 
-          list.add({
-            'name': nameCtrl.text.trim(), 
-            'extra_price': priceCtrl.text.trim().isEmpty ? 0 : int.parse(priceCtrl.text.trim())
-          }); 
-          nameCtrl.clear(); priceCtrl.clear(); 
-        });
-      }
-    }
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
-      Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-      Row(children:[
-        Expanded(flex: 2, child: TextField(controller: nameCtrl, onSubmitted: (_) => addItems(), decoration: const InputDecoration(hintText: 'Name (e.g. XL)', contentPadding: EdgeInsets.all(10)))),
-        const SizedBox(width: 10),
-        Expanded(flex: 1, child: TextField(controller: priceCtrl, keyboardType: TextInputType.number, onSubmitted: (_) => addItems(), decoration: const InputDecoration(hintText: '+ Extra ৳', contentPadding: EdgeInsets.all(10)))),
-        IconButton(icon: const Icon(Icons.add_circle, color: Colors.teal, size: 30), onPressed: addItems)
-      ]),
-      const SizedBox(height: 5),
-      Wrap(spacing: 8, children: list.map((item) => Chip(label: Text('${item['name']} ${item['extra_price'] > 0 ? '(+৳${item['extra_price']})' : ''}'), onDeleted: () => setState(() => list.remove(item)))).toList())
-    ]);
+  // =====================================
+  // Pro Variant Builder Widget (Your Idea Implemented)
+  // =====================================
+  Widget _buildProVariantSystem() {
+    return Container(
+      padding: const EdgeInsets.all(15), 
+      decoration: BoxDecoration(color: Colors.grey.shade50, border: Border.all(color: Colors.deepOrange.shade200), borderRadius: BorderRadius.circular(10)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children:[
+          const Text('Product Variants & Pricing', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.deepOrange)),
+          const SizedBox(height: 5),
+          const Text('সাইজ এবং কালার অনুযায়ী আলাদা দাম সেট করুন।', style: TextStyle(fontSize: 11, color: Colors.grey)),
+          const Divider(height: 25),
+
+          // ধাপ ১: একক (Unit) নির্বাচন
+          Row(
+            children:[
+              const Text('Select Unit: ', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(5)),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      isExpanded: true,
+                      value: _selectedUnit,
+                      items: availableUnits.map((u) => DropdownMenuItem(value: u, child: Text(u))).toList(),
+                      onChanged: (val) => setState(() => _selectedUnit = val!),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+
+          // ধাপ ২ ও ৩: সাইজ এবং কালারের লিস্ট
+          ...variantGroups.asMap().entries.map((entry) {
+            int groupIndex = entry.key;
+            Map<String, dynamic> group = entry.value;
+            List<Map<String, dynamic>> groupColors = group['colors'];
+
+            return Card(
+              margin: const EdgeInsets.only(bottom: 15),
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: Colors.teal.shade200)),
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children:[
+                    // সাইজ ইনপুট
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            initialValue: group['size'],
+                            keyboardType: TextInputType.text, // লেখা বা সংখ্যা দুটোই দেওয়া যাবে
+                            decoration: InputDecoration(
+                              labelText: 'Size / Value',
+                              hintText: 'e.g. 1 or XL',
+                              suffixText: _selectedUnit,
+                              isDense: true,
+                              border: const OutlineInputBorder(),
+                            ),
+                            onChanged: (val) => group['size'] = val,
+                          ),
+                        ),
+                        if (variantGroups.length > 1) // অন্তত একটি গ্রুপ থাকতে হবে
+                          IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () => setState(() => variantGroups.removeAt(groupIndex)),
+                          )
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    
+                    // কালার এবং দামের লিস্ট
+                    const Text('Available Colors for this size:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.teal)),
+                    const SizedBox(height: 5),
+                    
+                    ...groupColors.asMap().entries.map((colorEntry) {
+                      int colorIndex = colorEntry.key;
+                      Map<String, dynamic> colorItem = colorEntry.value;
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Row(
+                          children:[
+                            // কালার ড্রপডাউন
+                            Expanded(
+                              flex: 3,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10),
+                                decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(5)),
+                                child: DropdownButtonHideUnderline(
+                                  child: DropdownButton<String>(
+                                    isExpanded: true,
+                                    value: colorItem['name'],
+                                    items: availableColors.map((c) => DropdownMenuItem(value: c, child: Text(c, style: const TextStyle(fontSize: 13)))).toList(),
+                                    onChanged: (val) => setState(() => colorItem['name'] = val!),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            // দামের ইনপুট
+                            Expanded(
+                              flex: 2,
+                              child: TextFormField(
+                                initialValue: colorItem['price'].toString(),
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  hintText: '+ Amount',
+                                  prefixText: '+৳ ',
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+                                  border: OutlineInputBorder(),
+                                ),
+                                onChanged: (val) => colorItem['price'] = int.tryParse(val) ?? 0,
+                              ),
+                            ),
+                            // কালার ডিলিট বাটন
+                            if (groupColors.length > 1)
+                              IconButton(
+                                icon: const Icon(Icons.close, color: Colors.grey, size: 20),
+                                onPressed: () => setState(() => groupColors.removeAt(colorIndex)),
+                              )
+                            else
+                              const SizedBox(width: 40), // এলাইনমেন্ট ঠিক রাখার জন্য
+                          ],
+                        ),
+                      );
+                    }).toList(),
+
+                    // Add More Color Button
+                    TextButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          groupColors.add({'name': 'Black', 'price': 0});
+                        });
+                      },
+                      icon: const Icon(Icons.add, size: 16),
+                      label: const Text('Add Color'),
+                      style: TextButton.styleFrom(foregroundColor: Colors.teal),
+                    )
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+
+          // Add More Size Button
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                setState(() {
+                  variantGroups.add({
+                    'size': '',
+                    'colors':[{'name': 'Black', 'price': 0}]
+                  });
+                });
+              }, 
+              icon: const Icon(Icons.add_box), 
+              label: const Text('ADD ANOTHER SIZE'),
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.deepOrange, side: const BorderSide(color: Colors.deepOrange)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override Widget build(BuildContext context) {
@@ -4535,12 +4702,16 @@ class _AddProductPageState extends State<AddProductPage> {
           Row(children:[InkWell(onTap: pickImages, child: Container(height: 90, width: 90, decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.deepOrange, width: 2)), child: const Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(Icons.add_a_photo, color: Colors.deepOrange), Text('Add')]))), const SizedBox(width: 10), Expanded(child: SizedBox(height: 90, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: selectedImages.length, itemBuilder: (context, index) {return Container(width: 90, margin: const EdgeInsets.only(right: 10), decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), image: DecorationImage(image: kIsWeb ? NetworkImage(selectedImages[index].path) : FileImage(File(selectedImages[index].path)) as ImageProvider, fit: BoxFit.cover)), child: Align(alignment: Alignment.topRight, child: IconButton(icon: const Icon(Icons.cancel, color: Colors.red), onPressed: () => setState(() => selectedImages.removeAt(index)))));})))]),
           const SizedBox(height: 25), DropdownButtonFormField<String>(decoration: const InputDecoration(labelText: 'Select Category', border: OutlineInputBorder()), value: selectedCategory, items:['Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 'Watches', 'Baby & Toys', 'Groceries', 'Automotive', 'Women\'s Bags', 'Men\'s Wallets', 'Muslim Fashion', 'Games & Hobbies', 'Computers', 'Sports & Outdoor', 'Men Shoes', 'Cameras', 'Travel & Luggage'].map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(), onChanged: (val) => setState(() => selectedCategory = val)),
           const SizedBox(height: 20), TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Product Name', border: OutlineInputBorder())), const SizedBox(height: 15),
-          Row(children:[Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Sale Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: originalPriceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Original Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: stockController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Stock Qty', border: OutlineInputBorder())))]),
+          Row(children:[Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: originalPriceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Original Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: stockController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Stock Qty', border: OutlineInputBorder())))]),
           const SizedBox(height: 25), 
           Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.orange.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.orange)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[TextField(controller: tagInput, decoration: InputDecoration(hintText: 'Paste Tags (Comma separated)', suffixIcon: IconButton(icon: const Icon(Icons.add_circle, color: Colors.teal), onPressed: () { if (tagInput.text.trim().isNotEmpty) { setState(() { var t = tagInput.text.split(','); for(var x in t){if(x.trim().isNotEmpty) searchTags.add(x.trim());} tagInput.clear(); }); } }))), Wrap(spacing: 8, children: searchTags.map((item) => Chip(label: Text(item), onDeleted: () => setState(() => searchTags.remove(item)))).toList())])),
           const SizedBox(height: 25), 
-          _buildAdvancedVariantInput('Add Colors', colorNameInput, colorPriceInput, colors), const SizedBox(height: 15), 
-          _buildAdvancedVariantInput('Add Sizes', sizeNameInput, sizePriceInput, sizes),
+          
+          // =====================================
+          //[NEW] কল করা হলো প্রো-ভেরিয়েন্ট সিস্টেম
+          // =====================================
+          _buildProVariantSystem(),
+
           const SizedBox(height: 25), TextField(controller: descController, maxLines: 4, decoration: const InputDecoration(labelText: 'Description', border: OutlineInputBorder())), const SizedBox(height: 40),
           SizedBox(width: double.infinity, height: 55, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), onPressed: uploadProduct, child: const Text('SUBMIT PRODUCT', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))))
         ]),
