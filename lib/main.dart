@@ -866,6 +866,47 @@ class _CheckoutPageState extends State<CheckoutPage> {
         'customer_lng': userAddress!['longitude'],
       });
 
+      // =========================================================
+      // [NEW] ডাটাবেস থেকে স্পেসিফিক ভেরিয়েন্টের স্টক মাইনাস করা 
+      // =========================================================
+      for (var item in checkoutItems) {
+        String? productId = item['product_id']; // ProductDetails এ সেভ করা id
+        if (productId != null && productId.isNotEmpty) {
+          int orderQty = int.tryParse(item['quantity'].toString()) ?? 1;
+          String sColor = item['selected_color'] ?? '';
+          String sSize = item['selected_size'] ?? '';
+
+          DocumentReference pRef = FirebaseFirestore.instance.collection('products').doc(productId);
+
+          // Transaction ব্যবহার করছি যাতে একসাথে একাধিক কাস্টমার কিনলে স্টক এলোমেলো না হয়
+          await FirebaseFirestore.instance.runTransaction((transaction) async {
+            DocumentSnapshot pSnap = await transaction.get(pRef);
+            if (pSnap.exists) {
+              Map<String, dynamic> pData = pSnap.data() as Map<String, dynamic>;
+              int currentTotalStock = int.tryParse(pData['stock'].toString()) ?? 0;
+              List<dynamic> variants = pData['variants'] ??[];
+
+              // ভেরিয়েন্ট লিস্ট থেকে ম্যাচ করে স্টক মাইনাস করা
+              for (int i = 0; i < variants.length; i++) {
+                if (variants[i]['color'] == sColor && variants[i]['size'] == sSize) {
+                  int vStock = int.tryParse(variants[i]['stock'].toString()) ?? 0;
+                  variants[i]['stock'] = (vStock - orderQty) >= 0 ? (vStock - orderQty) : 0;
+                  break; // পেয়ে গেলে আর লুপ ঘোরার দরকার নেই
+                }
+              }
+
+              // ডাটাবেসে নতুন স্টক আপডেট করা
+              transaction.update(pRef, {
+                'stock': (currentTotalStock - orderQty) >= 0 ? (currentTotalStock - orderQty) : 0,
+                'sales_count': FieldValue.increment(orderQty), // সেলস কাউন্টও বাড়িয়ে দিলাম
+                'variants': variants
+              });
+            }
+          });
+        }
+      }
+      // =========================================================
+
       for (String docId in widget.selectedItemIds) {
         await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(docId).delete();
       }
@@ -1110,11 +1151,11 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
   
   int _selectedImageIndex = 0; 
   bool _isDescExpanded = false; 
-  bool _hasVariantError = false; // [NEW] পপ-আপের বদলে ইনলাইন এরর দেখানোর জন্য
+  bool _hasVariantError = false; 
   
-  Map<String, dynamic>? selectedColor;
-  Map<String, dynamic>? selectedSize;
-
+  // নতুন ভেরিয়েবলসমূহ
+  String? selectedColorName;
+  String? selectedSizeName;
   String adminPhoneNumber = "01700000000"; 
 
   @override
@@ -1171,80 +1212,37 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     Future.delayed(const Duration(milliseconds: 700), () => entry?.remove());
   }
 
-  void addToCart(BuildContext context, String imageUrl, int finalPrice, int maxStock, {bool isBuyNow = false}) async {
+  void addToCart(BuildContext context, String imageUrl, int finalPrice, int currentStock, bool requireVariants, {bool isBuyNow = false}) async {
     User? user = FirebaseAuth.instance.currentUser;
     
     if (user == null) {
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          contentPadding: const EdgeInsets.all(20),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children:[
-              const Icon(Icons.lock_outline, size: 60, color: Colors.deepOrange),
-              const SizedBox(height: 15),
-              const Text('লগিন প্রয়োজন!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 10),
-              const Text('অর্ডার করতে বা কার্টে অ্যাড করতে দয়া করে লগিন করুন।', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
-              const SizedBox(height: 25),
-              Row(
-                children:[
-                  Expanded(
-                    child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.grey), padding: const EdgeInsets.symmetric(vertical: 12)),
-                      onPressed: () => Navigator.pop(context), 
-                      child: const Text('Skip', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))
-                    )
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, padding: const EdgeInsets.symmetric(vertical: 12)),
-                      onPressed: () {
-                        Navigator.pop(context);
-                        Navigator.push(context, MaterialPageRoute(builder: (context) => const LoginPage()));
-                      }, 
-                      child: const Text('Login Now', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
-                    )
-                  ),
-                ]
-              )
-            ],
-          ),
-        )
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে লগিন করুন!')));
       return; 
     }
 
-    Map<String, dynamic> data = widget.product.data() as Map<String, dynamic>;
-    List<dynamic> colors = data.containsKey('colors') ? data['colors'] :[];
-    List<dynamic> sizes = data.containsKey('sizes') ? data['sizes'] :[];
-
-    // =====================================
-    // [FIXED] পপ-আপ রিমুভ করে ইনলাইন টেক্সট এনিমেশন দেওয়া হলো
-    // =====================================
-    if ((colors.isNotEmpty && selectedColor == null) || (sizes.isNotEmpty && selectedSize == null)) { 
+    if (requireVariants && (selectedColorName == null || selectedSizeName == null)) { 
       if (_variantKey.currentContext != null) {
         Scrollable.ensureVisible(_variantKey.currentContext!, alignment: 0.5, duration: const Duration(milliseconds: 500), curve: Curves.easeInOut);
       }
-      
       setState(() => _hasVariantError = true);
-      // ৩ সেকেন্ড পর লাল দাগ এবং টেক্সট চলে যাবে
       Future.delayed(const Duration(seconds: 3), () {
         if (mounted) setState(() => _hasVariantError = false);
       });
       return; 
     }
 
+    if (currentStock < 1) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দুঃখিত, এই ভেরিয়েন্টটি স্টকে নেই!'), backgroundColor: Colors.red));
+      return;
+    }
+
     if (!isBuyNow) runAddToCartAnimation(imageUrl);
 
     var cartRef = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart');
     var existingItem = await cartRef
-        .where('product_name', isEqualTo: widget.product['product_name'])
-        .where('selected_color', isEqualTo: selectedColor != null ? selectedColor!['name'] : '')
-        .where('selected_size', isEqualTo: selectedSize != null ? selectedSize!['name'] : '')
+        .where('product_id', isEqualTo: widget.product.id) // নতুন ফিক্স: product_id সেভ হচ্ছে
+        .where('selected_color', isEqualTo: selectedColorName ?? '')
+        .where('selected_size', isEqualTo: selectedSizeName ?? '')
         .get();
 
     String cartDocId = '';
@@ -1260,16 +1258,18 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         await cartRef.doc(cartDocId).update({'quantity': FieldValue.increment(1)});
       }
     } else {
+      Map<String, dynamic> pData = widget.product.data() as Map<String, dynamic>;
       var newDoc = await cartRef.add({
-        'product_name': widget.product['product_name'],
+        'product_id': widget.product.id, // অর্ডার প্লেস করার সময় কাজে লাগবে
+        'product_name': pData['product_name'],
         'price': finalPrice, 
-        'original_price': data['original_price'] ?? data['price'],
+        'original_price': pData['original_price'] ?? pData['price'],
         'quantity': 1,
         'image_url': imageUrl,
-        'selected_color': selectedColor != null ? selectedColor!['name'] : '',
-        'selected_size': selectedSize != null ? selectedSize!['name'] : '',
-        'max_stock': maxStock, 
-        'seller_id': data.containsKey('seller_id') ? data['seller_id'] : 'unknown',
+        'selected_color': selectedColorName ?? '',
+        'selected_size': selectedSizeName ?? '',
+        'max_stock': currentStock, 
+        'seller_id': pData.containsKey('seller_id') ? pData['seller_id'] : 'unknown',
         'added_at': FieldValue.serverTimestamp(),
       });
       cartDocId = newDoc.id;
@@ -1281,15 +1281,11 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
       int freeShippingThreshold = 0;
       try {
         DocumentSnapshot settingsDoc = await FirebaseFirestore.instance.collection('app_config').doc('delivery_settings').get();
-        if (settingsDoc.exists) {
-          freeShippingThreshold = ((settingsDoc.data() as Map<String, dynamic>)['free_shipping_threshold'] as num?)?.toInt() ?? 0;
-        }
+        if (settingsDoc.exists) freeShippingThreshold = ((settingsDoc.data() as Map<String, dynamic>)['free_shipping_threshold'] as num?)?.toInt() ?? 0;
       } catch (e) {}
 
-      int grandTotal = finalPrice * currentQty;
-
       Navigator.push(context, MaterialPageRoute(builder: (context) => CheckoutPage(
-        grandTotal: grandTotal, 
+        grandTotal: finalPrice * currentQty, 
         selectedItemIds:[cartDocId], 
         freeShippingThreshold: freeShippingThreshold
       ))); 
@@ -1310,80 +1306,67 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     }, SetOptions(merge: true));
   }
 
-  Widget _buildMiniProductCard(QueryDocumentSnapshot doc, {bool isGrid = false}) {
-    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-    List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] :[];
-    String firstImage = images.isNotEmpty ? images[0] : '';
-    
-    String displayPrice = data.containsKey('discount_price') && data['discount_price'].toString().isNotEmpty ? data['discount_price'].toString() : data['price'].toString();
-    int curP = int.tryParse(displayPrice) ?? 0;
-    int origP = int.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : '0') ?? 0;
-    int discount = origP > curP ? (((origP - curP) / origP) * 100).round() : 0;
-
-    return InkWell(
-      onTap: () {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: doc)));
-      },
-      child: Container(
-        width: isGrid ? null : 140,
-        margin: isGrid ? null : const EdgeInsets.only(right: 10),
-        decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.grey.shade200), borderRadius: BorderRadius.circular(8)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children:[
-            Expanded(
-              child: Stack(
-                children:[
-                  Container(
-                    width: double.infinity,
-                    decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(8))),
-                    child: firstImage.isNotEmpty ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(8)), child: Image.network(firstImage, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey),
-                  ),
-                  if (discount > 0)
-                    Positioned(top: 0, right: 0, child: Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: const BoxDecoration(color: Colors.red, borderRadius: BorderRadius.only(topRight: Radius.circular(8), bottomLeft: Radius.circular(8))), child: Text('-$discount%', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)))),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children:[
-                  Text(data['product_name'] ?? '', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-                  const SizedBox(height: 4),
-                  Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14)),
-                ],
-              ),
-            )
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     Map<String, dynamic> data = widget.product.data() as Map<String, dynamic>;
     List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] :[];
-    List<dynamic> colors = data.containsKey('colors') ? data['colors'] :[];
-    List<dynamic> sizes = data.containsKey('sizes') ? data['sizes'] :[];
-    String mainImage = images.isNotEmpty && images.length > _selectedImageIndex ? images[_selectedImageIndex] : '';
+    List<dynamic> variants = data.containsKey('variants') ? data['variants'] : [];
+    String unit = data['variant_unit'] ?? '';
     
     int basePrice = int.tryParse(data['price'].toString()) ?? 0;
     int originalPrice = int.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : '0') ?? 0;
-    int stock = int.tryParse(data['stock'].toString()) ?? 0;
-    
-    int extraColorPrice = selectedColor != null ? (selectedColor!['extra_price'] as num).toInt() : 0;
-    int extraSizePrice = selectedSize != null ? (selectedSize!['extra_price'] as num).toInt() : 0;
-    
-    int finalCurrentPrice = basePrice + extraColorPrice + extraSizePrice;
-    int finalOriginalPrice = originalPrice > 0 ? (originalPrice + extraColorPrice + extraSizePrice) : 0;
+    int totalStock = int.tryParse(data['stock'].toString()) ?? 0;
 
-    int discountPercent = 0;
-    if (finalOriginalPrice > finalCurrentPrice) {
-      discountPercent = (((finalOriginalPrice - finalCurrentPrice) / finalOriginalPrice) * 100).round();
+    // ইউনিক কালার এবং সাইজ ফিল্টার করা
+    Set<String> uniqueColors = {};
+    Set<String> uniqueSizes = {};
+    for (var v in variants) {
+      if (v['color'] != 'Default') uniqueColors.add(v['color']);
+      if (v['size'] != 'Default') uniqueSizes.add(v['size']);
+    }
+    bool requireVariants = uniqueColors.isNotEmpty || uniqueSizes.isNotEmpty;
+
+    // ডাইনামিক প্রাইজ, স্টক এবং ইমেজ ক্যালকুলেশন
+    int finalCurrentPrice = basePrice;
+    int currentDisplayedStock = totalStock;
+    String? activeColorImage;
+
+    if (requireVariants) {
+      try {
+         // সিলেক্টেড ভেরিয়েন্ট খোঁজা
+         var match = variants.firstWhere((v) => 
+            (selectedColorName == null || v['color'] == selectedColorName) &&
+            (selectedSizeName == null || v['size'] == selectedSizeName)
+         , orElse: () => {});
+
+         if (match.isNotEmpty) {
+           if (selectedColorName != null && selectedSizeName != null) {
+              finalCurrentPrice = basePrice + (match['price'] as int);
+              currentDisplayedStock = match['stock'] as int;
+           } else if (selectedColorName != null || selectedSizeName != null) {
+              // যদি শুধু একটি সিলেক্ট করে, তবে ওই অনুযায়ী স্টক দেখাবে
+              int tempStock = 0;
+              for(var vx in variants) {
+                if ((selectedColorName != null && vx['color'] == selectedColorName) || 
+                    (selectedSizeName != null && vx['size'] == selectedSizeName)) {
+                   tempStock += (vx['stock'] as int);
+                }
+              }
+              currentDisplayedStock = tempStock;
+           }
+         }
+
+         // কালার অনুযায়ী ছবি পরিবর্তন
+         if (selectedColorName != null) {
+            var colorMatch = variants.firstWhere((v) => v['color'] == selectedColorName && v['color_image_url'] != null, orElse: () => {});
+            if(colorMatch.isNotEmpty) activeColorImage = colorMatch['color_image_url'];
+         }
+      } catch(e){}
     }
 
+    String mainImage = activeColorImage ?? (images.isNotEmpty && images.length > _selectedImageIndex ? images[_selectedImageIndex] : '');
+    int finalOriginalPrice = originalPrice > basePrice ? (originalPrice + (finalCurrentPrice - basePrice)) : 0;
+    int discountPercent = finalOriginalPrice > finalCurrentPrice ? (((finalOriginalPrice - finalCurrentPrice) / finalOriginalPrice) * 100).round() : 0;
     String productCode = data['sku'] ?? 'N/A';
 
     return Scaffold(
@@ -1392,28 +1375,9 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         backgroundColor: Colors.white, elevation: 0,
         leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.black, size: 20), onPressed: () => Navigator.pop(context)),
         actions:[
-          StreamBuilder<DocumentSnapshot>(
-            stream: FirebaseAuth.instance.currentUser != null ? FirebaseFirestore.instance.collection('users').doc(FirebaseAuth.instance.currentUser!.uid).collection('wishlist').doc(widget.product.id).snapshots() : const Stream<DocumentSnapshot>.empty(),
-            builder: (context, snapshot) {
-              bool isWished = snapshot.hasData && snapshot.data!.exists;
-              return IconButton(
-                icon: Icon(isWished ? Icons.favorite : Icons.favorite_border, color: isWished ? Colors.red : Colors.black),
-                onPressed: () async {
-                  User? user = FirebaseAuth.instance.currentUser;
-                  if (user == null) return;
-                  var ref = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('wishlist').doc(widget.product.id);
-                  if (isWished) { await ref.delete(); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Removed from Wishlist 💔'))); } 
-                  else { await ref.set(widget.product.data() as Map<String, dynamic>); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Added to Wishlist ❤️'))); }
-                },
-              );
-            },
-          ),
+          IconButton(icon: const Icon(Icons.favorite_border, color: Colors.black), onPressed: () {}),
           IconButton(icon: const Icon(Icons.share, color: Colors.black), onPressed: () {}), 
-          IconButton(
-            key: _cartKey, 
-            icon: const Icon(Icons.shopping_cart_outlined, color: Colors.black), 
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const CartPage()))
-          )
+          IconButton(key: _cartKey, icon: const Icon(Icons.shopping_cart_outlined, color: Colors.black), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const CartPage())))
         ],
       ),
       body: Column(
@@ -1430,36 +1394,12 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                       children:[
                         Center(child: Container(key: _imageKey, height: 300, width: double.infinity, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: mainImage.isNotEmpty ? Image.network(mainImage, fit: BoxFit.contain) : const Icon(Icons.image, size: 100, color: Colors.grey))),
                         const SizedBox(height: 15),
-                        if (images.length > 1) SizedBox(height: 60, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: images.length, itemBuilder: (context, index) { bool isSelected = _selectedImageIndex == index; return InkWell(onTap: () => setState(() => _selectedImageIndex = index), child: Container(margin: const EdgeInsets.only(right: 10), height: 60, width: 60, decoration: BoxDecoration(border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), borderRadius: BorderRadius.circular(8), image: DecorationImage(image: NetworkImage(images[index]), fit: BoxFit.cover)))); })),
+                        if (images.length > 1) SizedBox(height: 60, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: images.length, itemBuilder: (context, index) { bool isSelected = _selectedImageIndex == index; return InkWell(onTap: () => setState(() { _selectedImageIndex = index; activeColorImage = null; }), child: Container(margin: const EdgeInsets.only(right: 10), height: 60, width: 60, decoration: BoxDecoration(border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), borderRadius: BorderRadius.circular(8), image: DecorationImage(image: NetworkImage(images[index]), fit: BoxFit.cover)))); })),
                         const SizedBox(height: 20),
                         
                         Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold), maxLines: 2, overflow: TextOverflow.ellipsis),
-                        
                         const SizedBox(height: 15),
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.green.shade200)),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children:[
-                              const Text('সহজে অর্ডার করতে কল বা মেসেজ করুন:', style: TextStyle(fontSize: 13, color: Colors.green, fontWeight: FontWeight.bold)),
-                              const SizedBox(height: 10),
-                              Row(
-                                children:[
-                                  Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.grey.shade300)), child: Text('Code: $productCode', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87))),
-                                  const Spacer(),
-                                  InkWell(onTap: () async { final Uri url = Uri.parse('tel:$adminPhoneNumber'); if (await canLaunchUrl(url)) await launchUrl(url); }, child: Container(width: 32, height: 32, decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle), child: const Icon(Icons.call, size: 18, color: Colors.white))),
-                                  const SizedBox(width: 10),
-                                  InkWell(onTap: () async { String msg = "হ্যালো, আমি এই প্রোডাক্টটি অর্ডার করতে চাই।\nপ্রোডাক্ট কোড: $productCode\nনাম: ${data['product_name']}"; String formattedPhone = adminPhoneNumber.startsWith('0') ? '+88$adminPhoneNumber' : adminPhoneNumber; final Uri waUrl = Uri.parse("https://wa.me/${formattedPhone.replaceAll('+', '')}?text=${Uri.encodeComponent(msg)}"); if (await canLaunchUrl(waUrl)) { await launchUrl(waUrl, mode: LaunchMode.externalApplication); }}, child: ClipOval(child: Image.network('https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/WhatsApp_icon.png/640px-WhatsApp_icon.png', width: 32, height: 32, fit: BoxFit.cover))),
-                                  const SizedBox(width: 10),
-                                  InkWell(onTap: () async { await Clipboard.setData(ClipboardData(text: adminPhoneNumber)); if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('অফিস নাম্বার ($adminPhoneNumber) কপি হয়েছে! ইমুতে গিয়ে মেসেজ দিন।'), backgroundColor: Colors.blue)); }, child: ClipOval(child: Image.network('https://play-lh.googleusercontent.com/Z42T401B7M_oQ3-dC3o7mNl6I1k3E280U0WfJIfy8uT-PZt1nE17s22pTioz_L8v0Q=w240-h240-rw', width: 32, height: 32, fit: BoxFit.cover, errorBuilder: (context, error, stackTrace) => Container(width: 32, height: 32, decoration: const BoxDecoration(color: Color(0xFF00A2FF), shape: BoxShape.circle), child: const Center(child: Text('imo', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold))))))),
-                                ],
-                              ),
-                            ]
-                          )
-                        ),
 
-                        const SizedBox(height: 15),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween, crossAxisAlignment: CrossAxisAlignment.end,
                           children:[
@@ -1481,8 +1421,8 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children:[
-                                Text('Stock: $stock', style: TextStyle(color: Colors.grey.shade700, fontWeight: FontWeight.bold)),
-                                if (stock > 0 && stock < 10) Text('Hurry, almost sold out!', style: TextStyle(color: Colors.red.shade400, fontSize: 10, fontStyle: FontStyle.italic)),
+                                Text('Stock: $currentDisplayedStock', style: TextStyle(color: currentDisplayedStock > 0 ? Colors.green : Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+                                if (currentDisplayedStock == 0) Text('Out of Stock', style: TextStyle(color: Colors.red.shade400, fontSize: 12, fontWeight: FontWeight.bold)),
                               ],
                             ),
                           ],
@@ -1493,124 +1433,59 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                   const SizedBox(height: 10), 
                   
                   // =====================================
-                  // ভেরিয়েন্ট সিলেকশন (Inline Error Text + Animated Border)
+                  // ভেরিয়েন্ট সিলেকশন (Matrix Data)
                   // =====================================
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 400),
-                    key: _variantKey, 
-                    width: double.infinity, 
-                    padding: const EdgeInsets.all(15),
-                    decoration: BoxDecoration(
-                      color: _hasVariantError ? Colors.red.shade50 : Colors.white,
-                      border: Border.all(color: _hasVariantError ? Colors.red.shade300 : Colors.transparent, width: 1.5),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children:[
-                        // ইনলাইন টেক্সট (মাঝে লাল লেখা আসবে যদি ভুল করে)
-                        if (_hasVariantError)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 15),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: const[
-                                Icon(Icons.arrow_downward, color: Colors.red, size: 18),
-                                SizedBox(width: 5),
-                                Text('দয়া করে সাইজ ও কালার সিলেক্ট করুন', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
-                                SizedBox(width: 5),
-                                Icon(Icons.arrow_downward, color: Colors.red, size: 18),
-                              ],
-                            ),
-                          ),
+                  if (requireVariants)
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 400),
+                      key: _variantKey, width: double.infinity, padding: const EdgeInsets.all(15),
+                      decoration: BoxDecoration(
+                        color: _hasVariantError ? Colors.red.shade50 : Colors.white,
+                        border: Border.all(color: _hasVariantError ? Colors.red.shade300 : Colors.transparent, width: 1.5),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children:[
+                          if (_hasVariantError)
+                            Padding(padding: const EdgeInsets.only(bottom: 15), child: Row(mainAxisAlignment: MainAxisAlignment.center, children: const[Icon(Icons.warning, color: Colors.red, size: 18), SizedBox(width: 5), Text('দয়া করে সাইজ ও কালার সিলেক্ট করুন', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),])),
 
-                        if(colors.isNotEmpty) ...[
-                          const Text('Colors', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10), 
-                          Wrap(spacing: 10, children: colors.map((c) {
-                              bool isSelected = selectedColor != null && selectedColor!['name'] == c['name'];
-                              int extra = (c['extra_price'] as num).toInt();
-                              return InkWell(
-                                onTap: () => setState(() => selectedColor = isSelected ? null : c),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), 
-                                  decoration: BoxDecoration(
-                                    color: isSelected ? Colors.deepOrange.shade50 : Colors.white, 
-                                    border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), 
-                                    borderRadius: BorderRadius.circular(5)
-                                  ), 
-                                  child: Text(
-                                    '${c['name']} ${extra > 0 ? '(+৳$extra)' : ''}', 
-                                    style: TextStyle(color: isSelected ? Colors.deepOrange : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)
+                          if(uniqueColors.isNotEmpty) ...[
+                            const Text('Select Color', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)), const SizedBox(height: 10), 
+                            Wrap(spacing: 10, runSpacing: 10, children: uniqueColors.map((colorName) {
+                                bool isSelected = selectedColorName == colorName;
+                                return InkWell(
+                                  onTap: () => setState(() => selectedColorName = isSelected ? null : colorName),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), 
+                                    decoration: BoxDecoration(color: isSelected ? Colors.deepOrange.shade50 : Colors.white, border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), borderRadius: BorderRadius.circular(5)), 
+                                    child: Text(colorName, style: TextStyle(color: isSelected ? Colors.deepOrange : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal))
                                   )
-                                )
-                              );
-                            }).toList()
-                          ), 
-                          const SizedBox(height: 20)
-                        ],
-                        if(sizes.isNotEmpty) ...[
-                          const Text('Sizes', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10), 
-                          Wrap(spacing: 10, children: sizes.map((s) {
-                              bool isSelected = selectedSize != null && selectedSize!['name'] == s['name'];
-                              int extra = (s['extra_price'] as num).toInt();
-                              return InkWell(
-                                onTap: () => setState(() => selectedSize = isSelected ? null : s),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), 
-                                  decoration: BoxDecoration(
-                                    color: isSelected ? Colors.teal.shade50 : Colors.white, 
-                                    border: Border.all(color: isSelected ? Colors.teal : Colors.grey.shade300, width: 1.5), 
-                                    borderRadius: BorderRadius.circular(5)
-                                  ), 
-                                  child: Text(
-                                    '${s['name']} ${extra > 0 ? '(+৳$extra)' : ''}', 
-                                    style: TextStyle(color: isSelected ? Colors.teal : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)
+                                );
+                              }).toList()
+                            ), 
+                            const SizedBox(height: 20)
+                          ],
+                          if(uniqueSizes.isNotEmpty) ...[
+                            Text('Select Size / Option ($unit)', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)), const SizedBox(height: 10), 
+                            Wrap(spacing: 10, runSpacing: 10, children: uniqueSizes.map((sizeName) {
+                                bool isSelected = selectedSizeName == sizeName;
+                                return InkWell(
+                                  onTap: () => setState(() => selectedSizeName = isSelected ? null : sizeName),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), 
+                                    decoration: BoxDecoration(color: isSelected ? Colors.teal.shade50 : Colors.white, border: Border.all(color: isSelected ? Colors.teal : Colors.grey.shade300, width: 1.5), borderRadius: BorderRadius.circular(5)), 
+                                    child: Text(sizeName, style: TextStyle(color: isSelected ? Colors.teal : Colors.black, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal))
                                   )
-                                )
-                              );
-                            }).toList()
-                          ), 
+                                );
+                              }).toList()
+                            ), 
+                          ],
                         ],
-                      ],
+                      ),
                     ),
-                  ),
                   const SizedBox(height: 10),
                   
-                  // শপ ডিটেলস
-                  Container(
-                    color: Colors.white, padding: const EdgeInsets.all(15),
-                    child: Row(
-                      children:[
-                        CircleAvatar(radius: 25, backgroundColor: Colors.teal.shade50, child: const Icon(Icons.storefront, color: Colors.teal, size: 28)), const SizedBox(width: 15),
-                        Expanded(
-                          child: FutureBuilder<DocumentSnapshot>(
-                            future: FirebaseFirestore.instance.collection('users').doc(data['seller_id']).get(),
-                            builder: (context, snapshot) {
-                              if (snapshot.hasData && snapshot.data!.exists) {
-                                var shopData = snapshot.data!.data() as Map<String, dynamic>;
-                                String shopName = shopData.containsKey('shop_name') && shopData['shop_name'].toString().isNotEmpty ? shopData['shop_name'] : shopData['name'];
-                                return Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text(shopName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), Row(children: const[Icon(Icons.verified, color: Colors.green, size: 14), SizedBox(width: 4), Text('Verified Shop', style: TextStyle(color: Colors.green, fontSize: 12))])]);
-                              }
-                              return const Text('Loading shop info...', style: TextStyle(color: Colors.grey));
-                            }
-                          ),
-                        ),
-                        OutlinedButton(
-                        onPressed: () {
-                          if (data['seller_id'] != null) {
-                            Navigator.push(context, MaterialPageRoute(builder: (context) => ShopPage(sellerId: data['seller_id'])));
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Shop details not found!')));
-                          }
-                        }, 
-                        style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.deepOrange), foregroundColor: Colors.deepOrange), 
-                        child: const Text('View Shop')
-                      )
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  
-                  // প্রোডাক্ট ডেসক্রিপশন
+                  // Product Description & Details
                   Container(
                     width: double.infinity, color: Colors.white, padding: const EdgeInsets.all(15),
                     child: Column(
@@ -1622,7 +1497,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children:[
-                              Text(data.containsKey('description') && data['description'].toString().isNotEmpty ? data['description'] : 'No description available for this product.', style: const TextStyle(color: Colors.black87, fontSize: 14, height: 1.5), maxLines: _isDescExpanded ? null : 4, overflow: _isDescExpanded ? TextOverflow.visible : TextOverflow.ellipsis),
+                              Text(data.containsKey('description') && data['description'].toString().isNotEmpty ? data['description'] : 'No description available.', style: const TextStyle(color: Colors.black87, fontSize: 14, height: 1.5), maxLines: _isDescExpanded ? null : 4, overflow: _isDescExpanded ? TextOverflow.visible : TextOverflow.ellipsis),
                               const SizedBox(height: 5),
                               Row(mainAxisAlignment: MainAxisAlignment.center, children:[Text(_isDescExpanded ? 'Show Less' : 'Read More', style: const TextStyle(color: Colors.teal, fontWeight: FontWeight.bold)), Icon(_isDescExpanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down, color: Colors.teal)])
                             ],
@@ -1630,82 +1505,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                         ),
                       ],
                     ),
-                  ),
-                  const SizedBox(height: 10),
-
-                  // More from this Shop
-                  if (data['seller_id'] != null)
-                    Container(
-                      color: Colors.white, padding: const EdgeInsets.all(15),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children:[
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children:[
-                              const Text('MORE FROM THIS SHOP', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                              Text('See All >', style: TextStyle(color: Colors.deepOrange.shade400, fontSize: 12)),
-                            ],
-                          ),
-                          const SizedBox(height: 15),
-                          SizedBox(
-                            height: 180,
-                            child: StreamBuilder(
-                              stream: FirebaseFirestore.instance.collection('products')
-                                  .where('seller_id', isEqualTo: data['seller_id'])
-                                  .where('status', isEqualTo: 'approved')
-                                  .limit(10)
-                                  .snapshots(),
-                              builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                                 if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-                                 var docs = snapshot.data!.docs.where((d) => d.id != widget.product.id).toList();
-                                 if (docs.isEmpty) return const Text('No other products from this shop.', style: TextStyle(color: Colors.grey));
-                                 
-                                 return ListView.builder(
-                                   scrollDirection: Axis.horizontal,
-                                   itemCount: docs.length,
-                                   itemBuilder: (context, index) => _buildMiniProductCard(docs[index])
-                                 );
-                              }
-                            )
-                          )
-                        ]
-                      )
-                    ),
-                  const SizedBox(height: 10),
-
-                  // Similar Products
-                  Container(
-                    color: Colors.white, padding: const EdgeInsets.all(15),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children:[
-                         const Text('SIMILAR PRODUCTS', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                         const SizedBox(height: 15),
-                         StreamBuilder(
-                            stream: FirebaseFirestore.instance.collection('products')
-                                .where('category', isEqualTo: data['category'])
-                                .where('status', isEqualTo: 'approved')
-                                .limit(10)
-                                .snapshots(),
-                            builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                               if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-                               var docs = snapshot.data!.docs.where((d) => d.id != widget.product.id).toList();
-                               if (docs.isEmpty) return const Text('No similar products found.', style: TextStyle(color: Colors.grey));
-                               
-                               return GridView.builder(
-                                 shrinkWrap: true,
-                                 physics: const NeverScrollableScrollPhysics(), 
-                                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                                   crossAxisCount: 2, childAspectRatio: 0.70, crossAxisSpacing: 10, mainAxisSpacing: 10
-                                 ),
-                                 itemCount: docs.length,
-                                 itemBuilder: (context, index) => _buildMiniProductCard(docs[index], isGrid: true)
-                               );
-                            }
-                          )
-                      ]
-                    )
                   ),
                   const SizedBox(height: 30),
                 ],
@@ -1718,9 +1517,9 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
             padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, boxShadow:[BoxShadow(color: Colors.grey.shade200, blurRadius: 10, offset: const Offset(0, -5))]),
             child: Row(
               children:[
-                Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, padding: const EdgeInsets.symmetric(vertical: 15)), onPressed: () => addToCart(context, mainImage, finalCurrentPrice, stock, isBuyNow: false), child: const Text('ADD TO CART', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: currentDisplayedStock > 0 ? Colors.deepOrange : Colors.grey, padding: const EdgeInsets.symmetric(vertical: 15)), onPressed: currentDisplayedStock > 0 ? () => addToCart(context, mainImage, finalCurrentPrice, currentDisplayedStock, requireVariants, isBuyNow: false) : null, child: const Text('ADD TO CART', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
                 const SizedBox(width: 15),
-                Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, padding: const EdgeInsets.symmetric(vertical: 15)), onPressed: () => addToCart(context, mainImage, finalCurrentPrice, stock, isBuyNow: true), child: const Text('BUY NOW', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: currentDisplayedStock > 0 ? Colors.teal : Colors.grey, padding: const EdgeInsets.symmetric(vertical: 15)), onPressed: currentDisplayedStock > 0 ? () => addToCart(context, mainImage, finalCurrentPrice, currentDisplayedStock, requireVariants, isBuyNow: true) : null, child: const Text('BUY NOW', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
               ],
             ),
           )
@@ -4427,23 +4226,73 @@ class _AddProductPageState extends State<AddProductPage> {
   final ImagePicker _picker = ImagePicker();
 
   // =====================================
-  // New Pro Variant System Variables
+  // Daraz/Shopee Style Matrix Variables
   // =====================================
-  String _selectedUnit = 'KG';
-  final List<String> availableUnits =['KG', 'Gram', 'Liter', 'ML', 'Piece', 'Inch', 'Size (S/M/L)'];
-  final List<String> availableColors =['Black', 'White', 'Red', 'Blue', 'Green', 'Yellow', 'Pink', 'Purple', 'Orange', 'Grey', 'Mixed', 'No Color'];
+  final unitController = TextEditingController(text: 'Watt'); 
+  
+  List<Map<String, dynamic>> selectedColors =[]; // কালার এবং তার ছবির ডাটা থাকবে
+  List<String> selectedSizes =[]; // শুধু সাইজগুলোর নাম থাকবে
+  List<Map<String, dynamic>> variantMatrix =[]; // সিস্টেম নিজে এই লিস্ট বানাবে
 
-  // এই লিস্টটি আপনার দেওয়া লজিক অনুযায়ী ডাটা ধরে রাখবে
-  // স্ট্রাকচার: [ { size: "1", colors:[ {name: "Red", price: 30}, ... ] }, ... ]
-  List<Map<String, dynamic>> variantGroups =[];
+  final TextEditingController colorInputCtrl = TextEditingController();
+  final TextEditingController sizeInputCtrl = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    // পেজ ওপেন হলেই ডিফল্টভাবে একটি খালি সাইজ ও কালার বক্স দেখাবে
-    variantGroups.add({
-      'size': '',
-      'colors': [{'name': 'Black', 'price': 0}]
+  }
+
+  // কালারের ছবি সিলেক্ট করার ফাংশন
+  Future<void> _pickColorImage(int index) async {
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 50);
+    if (image != null) {
+      setState(() {
+        selectedColors[index]['image'] = image;
+      });
+    }
+  }
+
+  // অটোমেটিক ম্যাট্রিক্স জেনারেট করার জাদুকরী ফাংশন
+  void _generateVariantMatrix() {
+    // আগের ডাটা যেন মুছে না যায়, তাই সেভ করে রাখা হচ্ছে
+    Map<String, Map<String, dynamic>> existingData = {};
+    for (var item in variantMatrix) {
+      String key = '${item['color']}_${item['size']}';
+      existingData[key] = item;
+    }
+
+    variantMatrix.clear();
+
+    if (selectedColors.isEmpty && selectedSizes.isEmpty) {
+      _calculateTotalStock();
+      return;
+    }
+
+    List<Map<String, dynamic>> tempColors = selectedColors.isNotEmpty ? selectedColors :[{'name': 'Default', 'image': null}];
+    List<String> tempSizes = selectedSizes.isNotEmpty ? selectedSizes :['Default'];
+
+    // কালার ও সাইজের জোড়া মেলানো হচ্ছে (Cartesian Product)
+    for (var c in tempColors) {
+      for (var s in tempSizes) {
+        String key = '${c['name']}_$s';
+        variantMatrix.add({
+          'color': c['name'],
+          'size': s,
+          'price': existingData[key]?['price'] ?? 0,
+          'stock': existingData[key]?['stock'] ?? 0,
+        });
+      }
+    }
+    _calculateTotalStock();
+  }
+
+  void _calculateTotalStock() {
+    int total = 0;
+    for (var item in variantMatrix) {
+      total += (item['stock'] ?? 0) as int;
+    }
+    setState(() {
+      stockController.text = total.toString();
     });
   }
 
@@ -4485,10 +4334,33 @@ class _AddProductPageState extends State<AddProductPage> {
 
       String generateSKU = 'DS-${DateTime.now().millisecondsSinceEpoch.toString().substring(9, 13)}${math.Random().nextInt(9)}';
 
-      // =====================================
-      // Data Formatting for Database
-      // =====================================
-      // নতুন স্ট্রাকচারটি ডাটাবেসে সেভ করার জন্য রেডি করা হচ্ছে
+      // --- নতুন: কালারের ছবি আপলোড করার লজিক ---
+      Map<String, String> uploadedColorImages = {};
+      for (var c in selectedColors) {
+        if (c['image'] != null) {
+          String cFileName = 'color_${DateTime.now().millisecondsSinceEpoch}_${c['name']}';
+          Reference cRef = FirebaseStorage.instance.ref().child('product_images/colors').child(cFileName);
+          if (kIsWeb) {
+            Uint8List bytes = await (c['image'] as XFile).readAsBytes();
+            await cRef.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
+          } else {
+            await cRef.putFile(File((c['image'] as XFile).path));
+          }
+          uploadedColorImages[c['name']] = await cRef.getDownloadURL();
+        }
+      }
+
+      // ম্যাট্রিক্সে ছবির লিংক যুক্ত করে দেওয়া
+      List<Map<String, dynamic>> finalMatrixToSave =[];
+      for (var v in variantMatrix) {
+        Map<String, dynamic> vCopy = Map.from(v);
+        if (uploadedColorImages.containsKey(vCopy['color'])) {
+          vCopy['color_image_url'] = uploadedColorImages[vCopy['color']];
+        }
+        finalMatrixToSave.add(vCopy);
+      }
+      // ------------------------------------------
+
       await FirebaseFirestore.instance.collection('products').add({
         'product_name': nameController.text.trim(), 
         'price': priceController.text.trim(), 
@@ -4502,9 +4374,18 @@ class _AddProductPageState extends State<AddProductPage> {
         'timestamp': FieldValue.serverTimestamp(), 
         'status': 'pending',
         'sku': generateSKU,
-        'variant_unit': _selectedUnit,         // একক (যেমন: KG)
-        'variants': variantGroups,             // আপনার বানানো প্রো-লজিক ডাটা
+        'variant_unit': unitController.text.trim(), 
+        'variants': finalMatrixToSave, // আপডেটেড ম্যাট্রিক্স সেভ হলো
       });
+
+      // --- অ্যাডমিনকে নোটিফিকেশন পাঠানোর লজিক ---
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'title': 'New Product Pending 📦',
+        'message': 'A seller has uploaded "${nameController.text.trim()}". Please review and approve.',
+        'target_role': 'admin', // এটি শুধু অ্যাডমিনদের জন্য
+        'sent_at': FieldValue.serverTimestamp(),
+      });
+      // -----------------------------------------
 
       if (!mounted) return;
       Navigator.pop(context); 
@@ -4517,176 +4398,212 @@ class _AddProductPageState extends State<AddProductPage> {
   }
 
   // =====================================
-  // Pro Variant Builder Widget (Your Idea Implemented)
+  // Daraz/Shopee Style Variant Matrix Builder
   // =====================================
   Widget _buildProVariantSystem() {
     return Container(
       padding: const EdgeInsets.all(15), 
-      decoration: BoxDecoration(color: Colors.grey.shade50, border: Border.all(color: Colors.deepOrange.shade200), borderRadius: BorderRadius.circular(10)),
+      decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.deepOrange.shade200), borderRadius: BorderRadius.circular(10), boxShadow: [BoxShadow(color: Colors.grey.shade100, blurRadius: 5)]),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children:[
-          const Text('Product Variants & Pricing', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.deepOrange)),
+          const Text('Product Variations (Daraz Style)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.deepOrange)),
           const SizedBox(height: 5),
-          const Text('সাইজ এবং কালার অনুযায়ী আলাদা দাম সেট করুন।', style: TextStyle(fontSize: 11, color: Colors.grey)),
+          const Text('প্রথমে কালার এবং সাইজগুলো যুক্ত করুন। নিচে অটোমেটিক লিস্ট তৈরি হবে।', style: TextStyle(fontSize: 11, color: Colors.grey)),
           const Divider(height: 25),
 
-          // ধাপ ১: একক (Unit) নির্বাচন
+          // --- Step 1: Add Colors & Images ---
+          const Text('1. Colors & Images', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
+          const SizedBox(height: 10),
           Row(
             children:[
-              const Text('Select Unit: ', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(width: 10),
               Expanded(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(5)),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      isExpanded: true,
-                      value: _selectedUnit,
-                      items: availableUnits.map((u) => DropdownMenuItem(value: u, child: Text(u))).toList(),
-                      onChanged: (val) => setState(() => _selectedUnit = val!),
-                    ),
-                  ),
+                child: TextField(
+                  controller: colorInputCtrl,
+                  decoration: const InputDecoration(hintText: 'e.g. Black, Red...', isDense: true, border: OutlineInputBorder()),
                 ),
               ),
+              const SizedBox(width: 10),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                onPressed: () {
+                  if (colorInputCtrl.text.isNotEmpty) {
+                    setState(() {
+                      selectedColors.add({'name': colorInputCtrl.text.trim(), 'image': null});
+                      colorInputCtrl.clear();
+                      _generateVariantMatrix(); // নতুন কালার দিলেই লিস্ট আপডেট হবে
+                    });
+                  }
+                },
+                child: const Text('Add', style: TextStyle(color: Colors.white)),
+              )
             ],
           ),
-          const SizedBox(height: 20),
-
-          // ধাপ ২ ও ৩: সাইজ এবং কালারের লিস্ট
-          ...variantGroups.asMap().entries.map((entry) {
-            int groupIndex = entry.key;
-            Map<String, dynamic> group = entry.value;
-            List<Map<String, dynamic>> groupColors = group['colors'];
-
-            return Card(
-              margin: const EdgeInsets.only(bottom: 15),
-              elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: Colors.teal.shade200)),
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children:[
-                    // সাইজ ইনপুট
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextFormField(
-                            initialValue: group['size'],
-                            keyboardType: TextInputType.text, // লেখা বা সংখ্যা দুটোই দেওয়া যাবে
-                            decoration: InputDecoration(
-                              labelText: 'Size / Value',
-                              hintText: 'e.g. 1 or XL',
-                              suffixText: _selectedUnit,
-                              isDense: true,
-                              border: const OutlineInputBorder(),
-                            ),
-                            onChanged: (val) => group['size'] = val,
-                          ),
+          const SizedBox(height: 10),
+          // দেখানো হচ্ছে সিলেক্ট করা কালারগুলো
+          if (selectedColors.isNotEmpty)
+            Wrap(
+              spacing: 10, runSpacing: 10,
+              children: selectedColors.asMap().entries.map((entry) {
+                int idx = entry.key;
+                Map<String, dynamic> c = entry.value;
+                return Container(
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(8)),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children:[
+                      // ছবি আপলোডের বাটন (প্রতিটি কালারের জন্য)
+                      InkWell(
+                        onTap: () => _pickColorImage(idx),
+                        child: Container(
+                          width: 30, height: 30,
+                          decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(5)),
+                          child: c['image'] != null 
+                              ? (kIsWeb ? Image.network(c['image'].path, fit: BoxFit.cover) : Image.file(File(c['image'].path), fit: BoxFit.cover))
+                              : const Icon(Icons.add_photo_alternate, size: 16, color: Colors.grey),
                         ),
-                        if (variantGroups.length > 1) // অন্তত একটি গ্রুপ থাকতে হবে
-                          IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () => setState(() => variantGroups.removeAt(groupIndex)),
-                          )
-                      ],
-                    ),
-                    const SizedBox(height: 15),
-                    
-                    // কালার এবং দামের লিস্ট
-                    const Text('Available Colors for this size:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.teal)),
-                    const SizedBox(height: 5),
-                    
-                    ...groupColors.asMap().entries.map((colorEntry) {
-                      int colorIndex = colorEntry.key;
-                      Map<String, dynamic> colorItem = colorEntry.value;
+                      ),
+                      const SizedBox(width: 8),
+                      Text(c['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(width: 5),
+                      InkWell(
+                        onTap: () => setState(() { selectedColors.removeAt(idx); _generateVariantMatrix(); }),
+                        child: const Icon(Icons.cancel, color: Colors.red, size: 18),
+                      )
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          
+          const Divider(height: 30),
 
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Row(
-                          children:[
-                            // কালার ড্রপডাউন
-                            Expanded(
-                              flex: 3,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10),
-                                decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(5)),
-                                child: DropdownButtonHideUnderline(
-                                  child: DropdownButton<String>(
-                                    isExpanded: true,
-                                    value: colorItem['name'],
-                                    items: availableColors.map((c) => DropdownMenuItem(value: c, child: Text(c, style: const TextStyle(fontSize: 13)))).toList(),
-                                    onChanged: (val) => setState(() => colorItem['name'] = val!),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            // দামের ইনপুট
-                            Expanded(
-                              flex: 2,
-                              child: TextFormField(
-                                initialValue: colorItem['price'].toString(),
-                                keyboardType: TextInputType.number,
-                                decoration: const InputDecoration(
-                                  hintText: '+ Amount',
-                                  prefixText: '+৳ ',
-                                  isDense: true,
-                                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 14),
-                                  border: OutlineInputBorder(),
-                                ),
-                                onChanged: (val) => colorItem['price'] = int.tryParse(val) ?? 0,
-                              ),
-                            ),
-                            // কালার ডিলিট বাটন
-                            if (groupColors.length > 1)
-                              IconButton(
-                                icon: const Icon(Icons.close, color: Colors.grey, size: 20),
-                                onPressed: () => setState(() => groupColors.removeAt(colorIndex)),
-                              )
-                            else
-                              const SizedBox(width: 40), // এলাইনমেন্ট ঠিক রাখার জন্য
-                          ],
-                        ),
-                      );
-                    }).toList(),
-
-                    // Add More Color Button
-                    TextButton.icon(
-                      onPressed: () {
-                        setState(() {
-                          groupColors.add({'name': 'Black', 'price': 0});
-                        });
-                      },
-                      icon: const Icon(Icons.add, size: 16),
-                      label: const Text('Add Color'),
-                      style: TextButton.styleFrom(foregroundColor: Colors.teal),
-                    )
-                  ],
+          // --- Step 2: Add Sizes/Units ---
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children:[
+              const Text('2. Sizes / Variations', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+              SizedBox(
+                width: 100,
+                child: TextField(
+                  controller: unitController,
+                  decoration: const InputDecoration(labelText: 'Unit (e.g. Watt)', isDense: true, border: UnderlineInputBorder()),
+                  onChanged: (v) => setState((){}),
+                ),
+              )
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children:[
+              Expanded(
+                child: TextField(
+                  controller: sizeInputCtrl,
+                  decoration: const InputDecoration(hintText: 'e.g. 120, XL, 32...', isDense: true, border: OutlineInputBorder()),
                 ),
               ),
-            );
-          }).toList(),
-
-          // Add More Size Button
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () {
-                setState(() {
-                  variantGroups.add({
-                    'size': '',
-                    'colors':[{'name': 'Black', 'price': 0}]
-                  });
-                });
-              }, 
-              icon: const Icon(Icons.add_box), 
-              label: const Text('ADD ANOTHER SIZE'),
-              style: OutlinedButton.styleFrom(foregroundColor: Colors.deepOrange, side: const BorderSide(color: Colors.deepOrange)),
-            ),
+              const SizedBox(width: 10),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                onPressed: () {
+                  if (sizeInputCtrl.text.isNotEmpty) {
+                    setState(() {
+                      selectedSizes.add(sizeInputCtrl.text.trim());
+                      sizeInputCtrl.clear();
+                      _generateVariantMatrix(); // সাইজ দিলেও লিস্ট আপডেট হবে
+                    });
+                  }
+                },
+                child: const Text('Add', style: TextStyle(color: Colors.white)),
+              )
+            ],
           ),
+          const SizedBox(height: 10),
+          if (selectedSizes.isNotEmpty)
+            Wrap(
+              spacing: 8,
+              children: selectedSizes.map((s) => Chip(
+                label: Text('$s ${unitController.text}'),
+                deleteIcon: const Icon(Icons.cancel, color: Colors.red, size: 18),
+                onDeleted: () => setState(() { selectedSizes.remove(s); _generateVariantMatrix(); }),
+              )).toList(),
+            ),
+
+          const Divider(height: 30, color: Colors.deepOrange, thickness: 1),
+
+          // --- Step 3: The Matrix (Stock & Price Table) ---
+          const Text('3. Set Stock & Extra Price', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 10),
+          
+          if (variantMatrix.isEmpty)
+            const Center(child: Text('Add colors and sizes to generate list.', style: TextStyle(color: Colors.grey)))
+          else
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: variantMatrix.length,
+              itemBuilder: (context, index) {
+                var item = variantMatrix[index];
+                bool isFirst = index == 0; // প্রথম আইটেম চেক (জালিয়াতি রোধ)
+                
+                String variantTitle = '';
+                if (item['color'] != 'Default') variantTitle += item['color'];
+                if (item['color'] != 'Default' && item['size'] != 'Default') variantTitle += ' - ';
+                if (item['size'] != 'Default') variantTitle += '${item['size']} ${unitController.text}';
+                if (variantTitle.isEmpty) variantTitle = 'Default Option';
+
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: Colors.grey.shade50, border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(8)),
+                  child: Row(
+                    children:[
+                      // ভেরিয়েন্টের নাম
+                      Expanded(flex: 2, child: Text(variantTitle, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+                      const SizedBox(width: 10),
+                      // স্টক ফিল্ড
+                      Expanded(
+                        flex: 1,
+                        child: TextFormField(
+                          initialValue: item['stock'].toString(),
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(labelText: 'Stock', isDense: true, border: OutlineInputBorder()),
+                          onChanged: (val) {
+                            variantMatrix[index]['stock'] = int.tryParse(val) ?? 0;
+                            _calculateTotalStock();
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      // এক্সট্রা প্রাইজের ফিল্ড (জালিয়াতি রোধ লজিকসহ)
+                      Expanded(
+                        flex: 2,
+                        child: TextFormField(
+                          initialValue: item['price'].toString(),
+                          keyboardType: TextInputType.number,
+                          readOnly: isFirst, // প্রথমটা এডিট করা যাবে না
+                          decoration: InputDecoration(
+                            labelText: isFirst ? 'Base Price' : '+ Extra ৳',
+                            isDense: true, 
+                            filled: isFirst, fillColor: isFirst ? Colors.grey.shade200 : Colors.white,
+                            border: const OutlineInputBorder()
+                          ),
+                          onChanged: (val) {
+                            variantMatrix[index]['price'] = int.tryParse(val) ?? 0;
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+            if (variantMatrix.isNotEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text('* প্রথম ভেরিয়েন্টের এক্সট্রা প্রাইজ সবসময় ০ (শূন্য) হবে, যাতে কাস্টমার সঠিক বেস প্রাইজ দেখতে পায়।', style: TextStyle(fontSize: 11, color: Colors.redAccent)),
+              ),
         ],
       ),
     );
@@ -4702,7 +4619,23 @@ class _AddProductPageState extends State<AddProductPage> {
           Row(children:[InkWell(onTap: pickImages, child: Container(height: 90, width: 90, decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.deepOrange, width: 2)), child: const Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(Icons.add_a_photo, color: Colors.deepOrange), Text('Add')]))), const SizedBox(width: 10), Expanded(child: SizedBox(height: 90, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: selectedImages.length, itemBuilder: (context, index) {return Container(width: 90, margin: const EdgeInsets.only(right: 10), decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), image: DecorationImage(image: kIsWeb ? NetworkImage(selectedImages[index].path) : FileImage(File(selectedImages[index].path)) as ImageProvider, fit: BoxFit.cover)), child: Align(alignment: Alignment.topRight, child: IconButton(icon: const Icon(Icons.cancel, color: Colors.red), onPressed: () => setState(() => selectedImages.removeAt(index)))));})))]),
           const SizedBox(height: 25), DropdownButtonFormField<String>(decoration: const InputDecoration(labelText: 'Select Category', border: OutlineInputBorder()), value: selectedCategory, items:['Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 'Watches', 'Baby & Toys', 'Groceries', 'Automotive', 'Women\'s Bags', 'Men\'s Wallets', 'Muslim Fashion', 'Games & Hobbies', 'Computers', 'Sports & Outdoor', 'Men Shoes', 'Cameras', 'Travel & Luggage'].map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(), onChanged: (val) => setState(() => selectedCategory = val)),
           const SizedBox(height: 20), TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Product Name', border: OutlineInputBorder())), const SizedBox(height: 15),
-          Row(children:[Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: originalPriceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Original Price (৳)', border: OutlineInputBorder()))), const SizedBox(width: 10), Expanded(child: TextField(controller: stockController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Stock Qty', border: OutlineInputBorder())))]),
+          Row(
+            children:[
+              Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base Price (৳)', border: OutlineInputBorder()))), 
+              const SizedBox(width: 10), 
+              Expanded(child: TextField(controller: originalPriceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Original Price (৳)', border: OutlineInputBorder()))), 
+              const SizedBox(width: 10), 
+              Expanded(child: TextField(
+                controller: stockController, 
+                readOnly: true, // এটি ইউজার নিজে এডিট করতে পারবে না
+                decoration: InputDecoration(
+                  labelText: 'Total Stock', 
+                  border: const OutlineInputBorder(),
+                  filled: true, fillColor: Colors.grey.shade200 // ছাই রঙের ব্যাকগ্রাউন্ড
+                )
+              )),
+            ]
+          ),
           const SizedBox(height: 25), 
           Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.orange.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.orange)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[TextField(controller: tagInput, decoration: InputDecoration(hintText: 'Paste Tags (Comma separated)', suffixIcon: IconButton(icon: const Icon(Icons.add_circle, color: Colors.teal), onPressed: () { if (tagInput.text.trim().isNotEmpty) { setState(() { var t = tagInput.text.split(','); for(var x in t){if(x.trim().isNotEmpty) searchTags.add(x.trim());} tagInput.clear(); }); } }))), Wrap(spacing: 8, children: searchTags.map((item) => Chip(label: Text(item), onDeleted: () => setState(() => searchTags.remove(item)))).toList())])),
           const SizedBox(height: 25), 
@@ -5331,7 +5264,7 @@ class _AdminLiveProductsPageState extends State<AdminLiveProductsPage> {
 
 
 // ==========================================
-// অ্যাডমিন প্রোডাক্ট এপ্রুভাল পেজ (বিস্তারিত তথ্য সহ)
+// অ্যাডমিন প্রোডাক্ট এপ্রুভাল পেজ (বিস্তারিত তথ্য ও ভেরিয়েন্ট সহ)
 // ==========================================
 class AdminProductApprovalPage extends StatefulWidget {
   const AdminProductApprovalPage({super.key});
@@ -5346,6 +5279,7 @@ class _AdminProductApprovalPageState extends State<AdminProductApprovalPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.grey.shade100,
       appBar: AppBar(title: const Text('PENDING APPROVALS'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
       body: StreamBuilder(
         stream: FirebaseFirestore.instance.collection('products').where('status', isEqualTo: 'pending').snapshots(),
@@ -5360,15 +5294,25 @@ class _AdminProductApprovalPageState extends State<AdminProductApprovalPage> {
               Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
               
               List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] : [];
-              List<dynamic> colors = data.containsKey('colors') ? data['colors'] :[];
-              List<dynamic> sizes = data.containsKey('sizes') ? data['sizes'] :[];
               List<dynamic> tags = data.containsKey('search_tags') ? data['search_tags'] :[];
+              
+              // নতুন ভেরিয়েন্ট ডাটা রিসিভ করা
+              List<dynamic> variants = data.containsKey('variants') ? data['variants'] : [];
+              String unit = data['variant_unit'] ?? '';
               
               String firstImage = images.isNotEmpty ? images[0] : '';
               bool isFlash = flashSaleStates[doc.id] ?? false;
 
+              // আপলোডের সময় বের করা
+              String uploadTime = 'Unknown Time';
+              if (data['timestamp'] != null) {
+                DateTime dt = (data['timestamp'] as Timestamp).toDate();
+                uploadTime = '${dt.day}/${dt.month}/${dt.year}  at  ${dt.hour > 12 ? dt.hour - 12 : dt.hour}:${dt.minute.toString().padLeft(2, '0')} ${dt.hour >= 12 ? 'PM' : 'AM'}';
+              }
+
               return Card(
                 margin: const EdgeInsets.all(10), elevation: 3,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 child: ExpansionTile(
                   leading: Container(
                     width: 50, height: 50,
@@ -5377,46 +5321,112 @@ class _AdminProductApprovalPageState extends State<AdminProductApprovalPage> {
                         ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(firstImage, fit: BoxFit.cover))
                         : const Icon(Icons.image, color: Colors.grey),
                   ),
-                  title: Text(data['product_name'] ?? 'No Name', style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text('Sale Price: ৳${data['price']} | Stock: ${data['stock']}'),
+                  title: Text(data['product_name'] ?? 'No Name', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  subtitle: Text('Base Price: ৳${data['price']} | Total Stock: ${data['stock']}', style: const TextStyle(color: Colors.deepOrange)),
                   children:[
                     Padding(
                       padding: const EdgeInsets.all(15.0),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children:[
+                          // সেলারের নাম ও আপলোডের সময়
+                          FutureBuilder<DocumentSnapshot>(
+                            future: FirebaseFirestore.instance.collection('users').doc(data['seller_id']).get(),
+                            builder: (context, sellerSnap) {
+                              String sellerName = 'Loading...';
+                              if (sellerSnap.hasData && sellerSnap.data!.exists) {
+                                var sData = sellerSnap.data!.data() as Map<String, dynamic>;
+                                sellerName = sData.containsKey('shop_name') && sData['shop_name'].toString().isNotEmpty ? sData['shop_name'] : sData['name'] ?? 'Unknown';
+                              }
+                              return Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(8)),
+                                child: Row(
+                                  children:[
+                                    const Icon(Icons.storefront, color: Colors.blue, size: 18),
+                                    const SizedBox(width: 8),
+                                    Expanded(child: Text('Seller: $sellerName', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue))),
+                                    const Icon(Icons.access_time, color: Colors.grey, size: 14),
+                                    const SizedBox(width: 4),
+                                    Text(uploadTime, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                                  ],
+                                ),
+                              );
+                            }
+                          ),
+                          const SizedBox(height: 15),
+
                           // সব ছবি দেখানো
-                          if(images.isNotEmpty) SizedBox(height: 60, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: images.length, itemBuilder: (context, i) => Container(margin: const EdgeInsets.only(right: 10), width: 60, decoration: BoxDecoration(borderRadius: BorderRadius.circular(5), image: DecorationImage(image: NetworkImage(images[i]), fit: BoxFit.cover))))),
-                          const Divider(),
-                          Text('Category: ${data['category']}'),
-                          Text('Original Price: ৳${data['original_price'] ?? 'N/A'}'),
+                          if(images.isNotEmpty) 
+                            SizedBox(
+                              height: 60, 
+                              child: ListView.builder(
+                                scrollDirection: Axis.horizontal, 
+                                itemCount: images.length, 
+                                itemBuilder: (context, i) => Container(margin: const EdgeInsets.only(right: 10), width: 60, decoration: BoxDecoration(borderRadius: BorderRadius.circular(5), image: DecorationImage(image: NetworkImage(images[i]), fit: BoxFit.cover)))
+                              )
+                            ),
+                          const Divider(height: 20),
+                          
+                          Text('Category: ${data['category']}', style: const TextStyle(fontWeight: FontWeight.bold)),
                           const SizedBox(height: 10),
-                          if(colors.isNotEmpty) Text('Colors: ${colors.map((c) => c['name']).join(", ")}'),
-                          if(sizes.isNotEmpty) Text('Sizes: ${sizes.map((s) => s['name']).join(", ")}'),
-                          if(tags.isNotEmpty) Text('Tags: ${tags.join(", ")}', style: const TextStyle(color: Colors.blue)),
+                          
+                          // ===================================
+                          // নতুন ভেরিয়েন্ট টেবিল (অ্যাডমিনের দেখার জন্য)
+                          // ===================================
+                          const Text('Product Variants & Stock Breakdown:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
+                          const SizedBox(height: 5),
+                          if (variants.isEmpty)
+                            const Text('No variants added.', style: TextStyle(color: Colors.red))
+                          else
+                            Container(
+                              decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(8)),
+                              child: Column(
+                                children: variants.map((v) {
+                                  return Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Colors.grey.shade200))),
+                                    child: Row(
+                                      children:[
+                                        if (v['color_image_url'] != null)
+                                          Container(width: 30, height: 30, margin: const EdgeInsets.only(right: 10), decoration: BoxDecoration(borderRadius: BorderRadius.circular(4), image: DecorationImage(image: NetworkImage(v['color_image_url']), fit: BoxFit.cover))),
+                                        Expanded(child: Text('${v['color']} - ${v['size']} $unit', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold))),
+                                        Text('Stock: ${v['stock']}   |   ', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                        Text('+৳${v['price']}', style: const TextStyle(fontSize: 13, color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                          
+                          const SizedBox(height: 15),
+                          if(tags.isNotEmpty) Text('Tags: ${tags.join(", ")}', style: const TextStyle(color: Colors.blue, fontSize: 12)),
                           const SizedBox(height: 10),
                           const Text('Description:', style: TextStyle(fontWeight: FontWeight.bold)),
-                          Text(data['description'] ?? 'No description'),
-                          const Divider(),
+                          Text(data['description'] ?? 'No description', style: const TextStyle(fontSize: 13)),
+                          const Divider(height: 30),
+
                           // একশনের অংশ (এপ্রুভ/রিজেক্ট)
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Row(children:[const Text('Flash Sale?'), Switch(value: isFlash, activeColor: Colors.teal, onChanged: (v) => setState(() => flashSaleStates[doc.id] = v))]),
-                              ElevatedButton(
-                                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                              Row(children:[const Text('Set Flash Sale?', style: TextStyle(fontWeight: FontWeight.bold)), Switch(value: isFlash, activeColor: Colors.deepOrange, onChanged: (v) => setState(() => flashSaleStates[doc.id] = v))]),
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
                                 onPressed: () {
                                   doc.reference.update({'status': 'approved', 'is_flash_sale': isFlash, 'reject_reason': ""});
-                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product Approved!')));
+                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product Approved Successfully! ✅')));
                                 },
-                                child: const Text('APPROVE', style: TextStyle(color: Colors.white)),
+                                icon: const Icon(Icons.check, color: Colors.white),
+                                label: const Text('APPROVE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 10),
+                          const SizedBox(height: 15),
                           Row(
                             children:[
-                              Expanded(child: TextField(controller: rejectController, decoration: const InputDecoration(hintText: 'রিজেক্টের কারণ...', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)))),
+                              Expanded(child: TextField(controller: rejectController, decoration: const InputDecoration(hintText: 'রিজেক্টের কারণ লিখুন...', border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 0)))),
                               const SizedBox(width: 10),
                               ElevatedButton(
                                 style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
@@ -5424,6 +5434,7 @@ class _AdminProductApprovalPageState extends State<AdminProductApprovalPage> {
                                   if(rejectController.text.isEmpty) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে কারণ লিখুন!'))); return; }
                                   doc.reference.update({'status': 'rejected', 'reject_reason': rejectController.text.trim()});
                                   rejectController.clear();
+                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product Rejected! ❌')));
                                 },
                                 child: const Text('REJECT', style: TextStyle(color: Colors.white)),
                               ),
