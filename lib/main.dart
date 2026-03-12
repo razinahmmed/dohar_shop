@@ -24,6 +24,7 @@ import 'dart:math' as math;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:flutter/services.dart';
 
 
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -154,11 +155,24 @@ class _MainScreenState extends State<MainScreen> {
     _setupPushNotifications();
   }
 
-  // কাস্টমার অ্যাপে নোটিফিকেশন রিসিভ করার সেটআপ
+  // কাস্টমার অ্যাপে নোটিফিকেশন রিসিভ করার সেটআপ (Updated for Background Push)
   void _setupPushNotifications() async {
     FirebaseMessaging messaging = FirebaseMessaging.instance;
-    // ইউজারের কাছে পারমিশন চাওয়া
     await messaging.requestPermission(alert: true, badge: true, sound: true);
+
+    // ১. Broadcast মেসেজ (সবার জন্য অফার) পাওয়ার জন্য 'all_users' টপিকে সাবস্ক্রাইব করা
+    await messaging.subscribeToTopic('all_users');
+
+    // ২. ইউজারের নির্দিষ্ট FCM Token ফায়ারবেসে সেভ করা (যাতে শুধু তাকে মেসেজ দেওয়া যায়)
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      String? token = await messaging.getToken();
+      if (token != null) {
+        await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+          'fcm_token': token,
+        });
+      }
+    }
 
     // অ্যাপ চালু থাকা অবস্থায় নোটিফিকেশন এলে স্ন্যাকবার দেখাবে
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
@@ -814,6 +828,103 @@ class _CheckoutPageState extends State<CheckoutPage> {
     );
   }
 
+  // =====================================
+  // আসল অর্ডার প্লেস করার ম্যাজিক ফাংশন
+  // =====================================
+  void _placeRealOrder() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null || userAddress == null || checkoutItems.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে ডেলিভারি ঠিকানা যুক্ত করুন!'), backgroundColor: Colors.red));
+      return;
+    }
+
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+      List<Map<String, dynamic>> itemsToOrder =[];
+      for (var item in checkoutItems) {
+        itemsToOrder.add({
+          'product_name': item['product_name'],
+          'price': item['price'],
+          'quantity': item['quantity'],
+          'seller_id': item['seller_id'] ?? 'unknown',
+          'image_url': item['image_url'] ?? '',
+        });
+      }
+
+      await FirebaseFirestore.instance.collection('orders').add({
+        'user_id': user.uid,
+        'items': itemsToOrder,
+        'total_amount': finalGrandTotal.toInt(),
+        'payment_method': selectedPayment,
+        'status': 'Pending',
+        'order_date': FieldValue.serverTimestamp(),
+        'shipping_name': userAddress!['shipping_name'],
+        'shipping_phone': userAddress!['shipping_phone'],
+        'shipping_address_text': userAddress!['shipping_address_text'],
+        'customer_lat': userAddress!['latitude'],
+        'customer_lng': userAddress!['longitude'],
+      });
+
+      for (String docId in widget.selectedItemIds) {
+        await FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(docId).delete();
+      }
+
+      if (!mounted) return;
+      Navigator.pop(context); // লোডিং বন্ধ
+
+      // আকর্ষণীয় Order Success Popup!
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          contentPadding: const EdgeInsets.all(20),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              const Icon(Icons.check_circle, color: Colors.green, size: 80),
+              const SizedBox(height: 15),
+              const Text('Order Successful! 🎉', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.green)),
+              const SizedBox(height: 10),
+              const Text('আপনার অর্ডারটি সফলভাবে প্লেস হয়েছে। আমরা খুব দ্রুত আপনার সাথে যোগাযোগ করব।', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
+              const SizedBox(height: 25),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children:[
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.teal), padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () {
+                        Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const MainScreen()), (route) => false);
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => const OrderHistoryPage())); 
+                      },
+                      child: const Text('View Order', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () {
+                        Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const MainScreen()), (route) => false);
+                      },
+                      child: const Text('OK', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              )
+            ],
+          ),
+        )
+      );
+
+    } catch (e) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
   @override 
   Widget build(BuildContext context) {
     return Scaffold(
@@ -965,10 +1076,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
                   ),
                   const SizedBox(width: 15),
                   InkWell(
-                    onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order Placed Successfully!')));
-                        Navigator.pop(context);
-                    },
+                    onTap: _placeRealOrder, // <--- এখানে আসল ফাংশন কল করা হলো
                     child: Container(height: 60, width: 130, alignment: Alignment.center, color: shopeeOrange, child: const Text('Place Order', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))),
                   )
                 ],
@@ -985,7 +1093,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
 }
 
 // ==========================================
-// ৩ নম্বর পেজ: Product Details (Fixed Variant Selection & Related Products)
+// ৩ নম্বর পেজ: Product Details (Dynamic Admin Phone, Call, WhatsApp & IMO integration)
 // ==========================================
 class ProductDetailsPage extends StatefulWidget {
   final QueryDocumentSnapshot product; 
@@ -999,10 +1107,35 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
   final GlobalKey _cartKey = GlobalKey();
   final GlobalKey _imageKey = GlobalKey();
   int _selectedImageIndex = 0; 
+  final GlobalKey _variantKey = GlobalKey(); // <--- অটো স্ক্রলের চাবি
   bool _isDescExpanded = false; 
   
   Map<String, dynamic>? selectedColor;
   Map<String, dynamic>? selectedSize;
+
+  // ডিফল্ট নাম্বার, তবে এটি অ্যাডমিন প্যানেল থেকে অটো আপডেট হবে
+  String adminPhoneNumber = "01700000000"; 
+
+  @override
+  void initState() {
+    super.initState();
+    _saveToRecentlyViewed(); 
+    _fetchAdminPhoneNumber(); // পেজ লোড হলেই অ্যাডমিনের নাম্বার নিয়ে আসবে
+  }
+
+  // অ্যাডমিন প্যানেল থেকে রিয়েল নাম্বার নিয়ে আসার ফাংশন
+  Future<void> _fetchAdminPhoneNumber() async {
+    try {
+      var doc = await FirebaseFirestore.instance.collection('app_config').doc('store_details').get();
+      if (doc.exists && doc.data() != null) {
+        setState(() {
+          adminPhoneNumber = doc['support_phone'] ?? "01700000000";
+        });
+      }
+    } catch (e) {
+      // Error handling
+    }
+  }
 
   // জাদুকরী Fly to Cart এনিমেশন ফাংশন
   void runAddToCartAnimation(String imageUrl) {
@@ -1052,8 +1185,31 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     List<dynamic> colors = data.containsKey('colors') ? data['colors'] :[];
     List<dynamic> sizes = data.containsKey('sizes') ? data['sizes'] :[];
 
-    if (colors.isNotEmpty && selectedColor == null) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে কালার সিলেক্ট করুন!'))); return; }
-    if (sizes.isNotEmpty && selectedSize == null) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে সাইজ সিলেক্ট করুন!'))); return; }
+    if ((colors.isNotEmpty && selectedColor == null) || (sizes.isNotEmpty && selectedSize == null)) { 
+      // alignment: 0.5 এর কারণে এটি পেজের ঠিক মাঝখানে এসে থামবে
+      if (_variantKey.currentContext != null) {
+        Scrollable.ensureVisible(
+          _variantKey.currentContext!, 
+          alignment: 0.5, // <--- ম্যাজিক! পেজের মাঝখানে আনবে
+          duration: const Duration(milliseconds: 500), 
+          curve: Curves.easeInOut
+        );
+      }
+      
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Row(
+          children:[
+            Icon(Icons.warning_amber_rounded, color: Colors.white),
+            SizedBox(width: 10),
+            Text('দয়া করে কালার এবং সাইজ সিলেক্ট করুন!', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+          ],
+        ),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        margin: EdgeInsets.all(20),
+      ));
+      return; 
+    }
 
     if (!isBuyNow) runAddToCartAnimation(imageUrl);
 
@@ -1069,17 +1225,13 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
 
     if (existingItem.docs.isNotEmpty) {
       cartDocId = existingItem.docs.first.id;
-      
       if (isBuyNow) {
-        // [FIXED]: Buy Now দিলে কোয়ান্টিটি আর বাড়বে না। জাস্ট ১ সেট হয়ে সরাসরি চেকআউটে যাবে।
         currentQty = 1;
         await cartRef.doc(cartDocId).update({'quantity': 1});
       } else {
-        // Add to Cart দিলে আগেরটার সাথে ১ যোগ হবে।
         currentQty = (existingItem.docs.first.data() as Map<String, dynamic>)['quantity'] + 1;
         await cartRef.doc(cartDocId).update({'quantity': FieldValue.increment(1)});
       }
-      
     } else {
       var newDoc = await cartRef.add({
         'product_name': widget.product['product_name'],
@@ -1099,7 +1251,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     if (!mounted) return;
 
     if (isBuyNow) { 
-      // Buy Now হলে ফ্রি শিপিং এমাউন্ট চেক করে সরাসরি Checkout পেজে পাঠিয়ে দিবে
       int freeShippingThreshold = 0;
       try {
         DocumentSnapshot settingsDoc = await FirebaseFirestore.instance.collection('app_config').doc('delivery_settings').get();
@@ -1132,13 +1283,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     }, SetOptions(merge: true));
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _saveToRecentlyViewed(); 
-  }
-
-  // নিচে সিমিলার প্রোডাক্ট দেখানোর জন্য ছোট কার্ডের উইজেট
   Widget _buildMiniProductCard(QueryDocumentSnapshot doc, {bool isGrid = false}) {
     Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
     List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] :[];
@@ -1151,7 +1295,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
 
     return InkWell(
       onTap: () {
-        // একই পেজে অন্য প্রোডাক্ট ওপেন হবে
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: doc)));
       },
       child: Container(
@@ -1160,7 +1303,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.grey.shade200), borderRadius: BorderRadius.circular(8)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+          children:[
             Expanded(
               child: Stack(
                 children:[
@@ -1178,7 +1321,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
               padding: const EdgeInsets.all(8.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+                children:[
                   Text(data['product_name'] ?? '', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
                   const SizedBox(height: 4),
                   Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14)),
@@ -1213,6 +1356,8 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     if (finalOriginalPrice > finalCurrentPrice) {
       discountPercent = (((finalOriginalPrice - finalCurrentPrice) / finalOriginalPrice) * 100).round();
     }
+
+    String productCode = data['sku'] ?? 'N/A';
 
     return Scaffold(
       backgroundColor: Colors.grey.shade100, 
@@ -1260,15 +1405,101 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                         const SizedBox(height: 15),
                         if (images.length > 1) SizedBox(height: 60, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: images.length, itemBuilder: (context, index) { bool isSelected = _selectedImageIndex == index; return InkWell(onTap: () => setState(() => _selectedImageIndex = index), child: Container(margin: const EdgeInsets.only(right: 10), height: 60, width: 60, decoration: BoxDecoration(border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), borderRadius: BorderRadius.circular(8), image: DecorationImage(image: NetworkImage(images[index]), fit: BoxFit.cover)))); })),
                         const SizedBox(height: 20),
+                        
                         Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold), maxLines: 2, overflow: TextOverflow.ellipsis),
-                        // নতুন: প্রোডাক্টের SKU কোড দেখানো
+                        
+                        // =====================================
+                        //[NEW]: Call / WhatsApp / IMO Section
+                        // =====================================
+                        const SizedBox(height: 15),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(5)),
-                          child: Text('Code: ${data['sku'] ?? 'N/A'}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87)),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.green.shade50,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: Colors.green.shade200)
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children:[
+                              const Text('সহজে অর্ডার করতে কল বা মেসেজ করুন:', style: TextStyle(fontSize: 16, color: Colors.green, fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 10),
+                              Row(
+                                children:[
+                                  // Product Code
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.grey.shade300)),
+                                    child: Text('Code: $productCode', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87)),
+                                  ),
+                                  const Spacer(),
+                                  
+                                  // Phone Call Button
+                                  InkWell(
+                                    onTap: () async {
+                                      final Uri url = Uri.parse('tel:$adminPhoneNumber'); 
+                                      if (await canLaunchUrl(url)) await launchUrl(url);
+                                    },
+                                    child: Container(
+                                      width: 32, height: 32,
+                                      decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle),
+                                      child: const Icon(Icons.call, size: 18, color: Colors.white),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+
+                                  // WhatsApp Button (Direct Web URL with Message)
+                                  InkWell(
+                                    onTap: () async {
+                                      String msg = "হ্যালো, আমি এই প্রোডাক্টটি অর্ডার করতে চাই।\nপ্রোডাক্ট কোড: $productCode\nনাম: ${data['product_name']}";
+                                      String formattedPhone = adminPhoneNumber;
+                                      // হোয়াটসঅ্যাপের জন্য দেশের কোড থাকা লাগে
+                                      if (formattedPhone.startsWith('0')) {
+                                        formattedPhone = '+88$formattedPhone';
+                                      }
+                                      final Uri waUrl = Uri.parse("https://wa.me/${formattedPhone.replaceAll('+', '')}?text=${Uri.encodeComponent(msg)}");
+                                      if (await canLaunchUrl(waUrl)) {
+                                        await launchUrl(waUrl, mode: LaunchMode.externalApplication);
+                                      } else {
+                                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('WhatsApp ওপেন করা যাচ্ছে না!')));
+                                      }
+                                    },
+                                    child: Image.network('https://img.icons8.com/color/512/whatsapp--v1.png', width: 43, height: 43),
+                                  ),
+                                  const SizedBox(width: 10),
+
+                                  // IMO Button (Copy to Clipboard)
+                                  InkWell(
+                                    onTap: () async {
+                                      // নাম্বার কপি করা হলো
+                                      await Clipboard.setData(ClipboardData(text: adminPhoneNumber));
+                                      if (mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                          content: Text('অফিস নাম্বার ($adminPhoneNumber) কপি হয়েছে! ইমুতে গিয়ে মেসেজ দিন।'),
+                                          duration: const Duration(seconds: 4),
+                                          backgroundColor: Colors.blue,
+                                        ));
+                                      }
+                                    },
+                                    child: Image.network(
+                                      'https://img.icons8.com/color/512/imo.png', 
+                                      width: 32, height: 32,
+                                      // যদি ইমেজ লোড না হয়, তাহলে নীল গোল আইকন দেখাবে
+                                      errorBuilder: (context, error, stackTrace) => Container(
+                                        width: 32, height: 32, 
+                                        decoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle), 
+                                        child: const Center(child: Text('IMO', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)))
+                                      )
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ]
+                          )
                         ),
-                        const SizedBox(height: 10),
-                        const SizedBox(height: 10),
+                        // =====================================
+
+                        const SizedBox(height: 15),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween, crossAxisAlignment: CrossAxisAlignment.end,
                           children:[
@@ -1303,6 +1534,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                   
                   // ভেরিয়েন্ট সিলেকশন (কালার এবং সাইজ)
                   Container(
+                    key: _variantKey, // <--- এই চাবিটি এখানে বসাতে হবে
                     width: double.infinity, color: Colors.white, padding: const EdgeInsets.all(15),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1310,7 +1542,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                         if(colors.isNotEmpty) ...[
                           const Text('Colors', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10), 
                           Wrap(spacing: 10, children: colors.map((c) {
-                              // [FIXED]: অবজেক্ট কম্পেয়ার না করে নাম দিয়ে কম্পেয়ার করা হয়েছে যাতে বর্ডার ঠিকমত আসে
                               bool isSelected = selectedColor != null && selectedColor!['name'] == c['name'];
                               int extra = (c['extra_price'] as num).toInt();
                               return InkWell(
@@ -1319,7 +1550,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                                   padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), 
                                   decoration: BoxDecoration(
                                     color: isSelected ? Colors.deepOrange.shade50 : Colors.white, 
-                                    border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), // বর্ডার ভিজিবল করা হয়েছে
+                                    border: Border.all(color: isSelected ? Colors.deepOrange : Colors.grey.shade300, width: 1.5), 
                                     borderRadius: BorderRadius.circular(5)
                                   ), 
                                   child: Text(
@@ -1335,7 +1566,6 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                         if(sizes.isNotEmpty) ...[
                           const Text('Sizes', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 10), 
                           Wrap(spacing: 10, children: sizes.map((s) {
-                              // [FIXED]: অবজেক্ট কম্পেয়ার না করে নাম দিয়ে কম্পেয়ার করা হয়েছে
                               bool isSelected = selectedSize != null && selectedSize!['name'] == s['name'];
                               int extra = (s['extra_price'] as num).toInt();
                               return InkWell(
@@ -1419,15 +1649,13 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                   ),
                   const SizedBox(height: 10),
 
-                  // =====================================
-                  // NEW: More from this Shop
-                  // =====================================
+                  // More from this Shop
                   if (data['seller_id'] != null)
                     Container(
                       color: Colors.white, padding: const EdgeInsets.all(15),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
+                        children:[
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children:[
@@ -1463,9 +1691,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                     ),
                   const SizedBox(height: 10),
 
-                  // =====================================
-                  // NEW: Similar Products
-                  // =====================================
+                  // Similar Products
                   Container(
                     color: Colors.white, padding: const EdgeInsets.all(15),
                     child: Column(
@@ -1538,6 +1764,66 @@ class _ShopeeHomeState extends State<ShopeeHome> {
   String searchQuery = '';
   String selectedCategoryFilter = ''; 
   final TextEditingController searchController = TextEditingController();
+
+  // =====================================
+  // Algolia Setup (REST API - No package required!)
+  // =====================================
+  final String algoliaAppId = 'WULDWCKKQ3'; // <--- এখানে আপনার Algolia Application ID বসান
+  final String algoliaSearchKey = '59964acedc064ab0f9fcbafd2b567aec'; // <--- এখানে Search-Only API Key বসান
+
+  List<Map<String, dynamic>> algoliaSearchResults =[];
+  bool isSearchingAlgolia = false;
+
+  // Algolia তে সার্চ করার ফাংশন (Direct API Call)
+  Future<void> _performAlgoliaSearch(String query) async {
+    if (query.isEmpty) {
+      setState(() {
+        algoliaSearchResults.clear();
+        isSearchingAlgolia = false;
+      });
+      return;
+    }
+
+    setState(() => isSearchingAlgolia = true);
+
+    try {
+      // 'products' হলো আপনার Algolia Index এর নাম
+      String url = 'https://$algoliaAppId-dsn.algolia.net/1/indexes/products/query';
+
+      var response = await http.post(
+        Uri.parse(url),
+        headers: {
+          'X-Algolia-Application-Id': algoliaAppId,
+          'X-Algolia-API-Key': algoliaSearchKey,
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+        body: json.encode({
+          'params': 'query=$query'
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        var data = json.decode(response.body);
+        List<dynamic> hits = data['hits'];
+
+        List<Map<String, dynamic>> results = hits.map((hit) {
+          Map<String, dynamic> item = Map<String, dynamic>.from(hit);
+          return item; // Algolia রেজাল্টে objectID অটোমেটিক থাকে
+        }).toList();
+
+        setState(() {
+          algoliaSearchResults = results;
+          isSearchingAlgolia = false;
+        });
+      } else {
+        setState(() => isSearchingAlgolia = false);
+        print("Algolia API Error: ${response.statusCode}");
+      }
+    } catch (e) {
+      setState(() => isSearchingAlgolia = false);
+      print("Algolia Search Error: $e");
+    }
+  }
 
   final List<Map<String, dynamic>> staticCategories =[
     {'name': 'Fashion', 'icon': Icons.checkroom, 'color': Colors.pink}, 
@@ -1710,7 +1996,7 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                             stream: FirebaseFirestore.instance.collection('categories').snapshots(),
                             builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
                               return SizedBox(
-                                height: 105, 
+                                height: 125, // <--- হাইট ১০৫ থেকে ১২৫ করা হয়েছে
                                 child: ListView.builder(
                                   scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 10),
                                   itemCount: (snapshot.hasData && snapshot.data!.docs.isNotEmpty) ? snapshot.data!.docs.length : staticCategories.length,
@@ -1900,6 +2186,7 @@ class _ShopeeHomeState extends State<ShopeeHome> {
     );
   }
 
+  // আপডেট করা স্ট্যাটিক ক্যাটাগরি (বক্স ডিজাইন)
   Widget _buildStaticCategory(String label, IconData icon, Color iconColor) {
     bool isSelected = selectedCategoryFilter == label;
     return InkWell(
@@ -1908,16 +2195,38 @@ class _ShopeeHomeState extends State<ShopeeHome> {
         padding: const EdgeInsets.symmetric(horizontal: 8), 
         child: Column(children:[
           Container(
-            decoration: BoxDecoration(shape: BoxShape.circle, border: isSelected ? Border.all(color: Colors.deepOrange, width: 2.5) : Border.all(color: Colors.transparent, width: 2.5)),
-            child: CircleAvatar(radius: 26, backgroundColor: iconColor.withOpacity(0.15), child: Icon(icon, color: iconColor, size: 28))
+            width: 70, height: 70, // <--- সাইজ বড় করা হয়েছে
+            decoration: BoxDecoration(
+              color: iconColor.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(15), // <--- গোল এর বদলে রাউন্ডেড বক্স
+              border: Border.all(
+                color: isSelected ? Colors.deepOrange : Colors.transparent, 
+                width: 2.5
+              )
+            ),
+            child: Center(child: Icon(icon, color: iconColor, size: 35)), // <--- আইকন বড় করা হয়েছে
           ), 
-          const SizedBox(height: 5), 
-          SizedBox(width: 60, child: Text(label, textAlign: TextAlign.center, style: TextStyle(fontSize: 9, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, color: isSelected ? Colors.deepOrange : Colors.black), maxLines: 2, overflow: TextOverflow.ellipsis))
+          const SizedBox(height: 8), 
+          SizedBox(
+            width: 75, 
+            child: Text(
+              label, 
+              textAlign: TextAlign.center, 
+              style: TextStyle(
+                fontSize: 10, // ফন্ট সাইজ একটু বড় করা হয়েছে
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, 
+                color: isSelected ? Colors.deepOrange : Colors.black
+              ), 
+              maxLines: 2, 
+              overflow: TextOverflow.ellipsis
+            )
+          )
         ])
       ),
     );
   }
 
+  // আপডেট করা ডাইনামিক ক্যাটাগরি (বক্স ডিজাইন)
   Widget _buildDynamicCategory(String label, String imageUrl) {
     bool isSelected = selectedCategoryFilter == label;
     return InkWell(
@@ -1926,11 +2235,39 @@ class _ShopeeHomeState extends State<ShopeeHome> {
         padding: const EdgeInsets.symmetric(horizontal: 8), 
         child: Column(children:[
           Container(
-            decoration: BoxDecoration(shape: BoxShape.circle, border: isSelected ? Border.all(color: Colors.deepOrange, width: 2.5) : Border.all(color: Colors.transparent, width: 2.5)),
-            child: CircleAvatar(radius: 26, backgroundColor: Colors.grey.shade100, backgroundImage: NetworkImage(imageUrl))
+            width: 70, height: 70, // <--- সাইজ বড় করা হয়েছে
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(15), // <--- গোল এর বদলে রাউন্ডেড বক্স
+              border: Border.all(
+                color: isSelected ? Colors.deepOrange : Colors.transparent, 
+                width: 2.5
+              ),
+              // শ্যাডো দিলে দেখতে আরও প্রিমিয়াম লাগবে
+              boxShadow:[
+                BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 5, offset: const Offset(0, 3))
+              ]
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12), // <--- ছবির চারপাশ রাউন্ড করার জন্য
+              child: Image.network(imageUrl, fit: BoxFit.cover)
+            ),
           ), 
-          const SizedBox(height: 5), 
-          SizedBox(width: 60, child: Text(label, textAlign: TextAlign.center, style: TextStyle(fontSize: 9, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, color: isSelected ? Colors.deepOrange : Colors.black), maxLines: 2, overflow: TextOverflow.ellipsis))
+          const SizedBox(height: 8), 
+          SizedBox(
+            width: 75, 
+            child: Text(
+              label, 
+              textAlign: TextAlign.center, 
+              style: TextStyle(
+                fontSize: 10, 
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, 
+                color: isSelected ? Colors.deepOrange : Colors.black
+              ), 
+              maxLines: 2, 
+              overflow: TextOverflow.ellipsis
+            )
+          )
         ])
       ),
     );
@@ -6628,7 +6965,7 @@ class _RiderDashboardState extends State<RiderDashboard> {
 }
 
 // ==========================================
-// রাইডার পেজ ২: Task Management (Real-time Order Workflow)
+// রাইডার পেজ ২: Task Management (Index Error Fixed)
 // ==========================================
 class RiderTaskManagement extends StatelessWidget {
   const RiderTaskManagement({super.key});
@@ -6655,22 +6992,31 @@ class RiderTaskManagement extends StatelessWidget {
           ),
         ),
         body: StreamBuilder<QuerySnapshot>(
-          stream: FirebaseFirestore.instance.collection('orders').where('assigned_rider_id', isEqualTo: currentUser.uid).orderBy('order_date', descending: true).snapshots(),
+          // [FIXED] .orderBy বাদ দেওয়া হয়েছে
+          stream: FirebaseFirestore.instance.collection('orders').where('assigned_rider_id', isEqualTo: currentUser.uid).snapshots(),
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
             if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('No assigned tasks.'));
 
-            var allTasks = snapshot.data!.docs;
+            // Local Sorting
+            var allTasks = snapshot.data!.docs.toList();
+            allTasks.sort((a, b) {
+              Timestamp? tA = (a.data() as Map<String, dynamic>)['order_date'] as Timestamp?;
+              Timestamp? tB = (b.data() as Map<String, dynamic>)['order_date'] as Timestamp?;
+              if (tA == null || tB == null) return 0;
+              return tB.compareTo(tA);
+            });
+
             // স্ট্যাটাস অনুযায়ী ফিল্টার
-            var pendingPickup = allTasks.where((doc) => doc['status'] == 'Dispatched').toList(); // অ্যাডমিন অ্যাসাইন করলে Dispatched হয়
-            var inTransit = allTasks.where((doc) => doc['status'] == 'In-Transit').toList();
-            var delivered = allTasks.where((doc) => doc['status'] == 'Delivered').toList();
+            var pendingPickup = allTasks.where((doc) => (doc.data() as Map<String, dynamic>)['status'] == 'Dispatched').toList(); 
+            var inTransit = allTasks.where((doc) => (doc.data() as Map<String, dynamic>)['status'] == 'In-Transit').toList();
+            var delivered = allTasks.where((doc) => (doc.data() as Map<String, dynamic>)['status'] == 'Delivered' || (doc.data() as Map<String, dynamic>)['status'] == 'Delivery Failed').toList();
 
             return TabBarView(
               children:[
-                _buildTaskList(pendingPickup, 'Pick Up', Colors.orange),
-                _buildTaskList(inTransit, 'Deliver Now', Colors.blue),
-                _buildTaskList(delivered, 'Done', Colors.green, isCompleted: true),
+                _buildTaskList(context, pendingPickup, 'Pick Up', Colors.orange),
+                _buildTaskList(context, inTransit, 'Deliver Now', Colors.blue),
+                _buildTaskList(context, delivered, 'Done', Colors.green, isCompleted: true),
               ],
             );
           }
@@ -6679,7 +7025,7 @@ class RiderTaskManagement extends StatelessWidget {
     );
   }
 
-  Widget _buildTaskList(List<QueryDocumentSnapshot> tasks, String actionText, Color actionColor, {bool isCompleted = false}) {
+  Widget _buildTaskList(BuildContext context, List<QueryDocumentSnapshot> tasks, String actionText, Color actionColor, {bool isCompleted = false}) {
     if (tasks.isEmpty) return Center(child: Text('এই ট্যাবে কোনো টাস্ক নেই।', style: TextStyle(color: Colors.grey.shade500)));
 
     return ListView.builder(
@@ -6719,18 +7065,20 @@ class RiderTaskManagement extends StatelessWidget {
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(backgroundColor: actionColor), 
                       onPressed: () async {
-                        // বাটন লজিক: Pick Up চাপলে In-Transit হবে, Deliver চাপলে Delivered হবে
-                        String newStatus = status == 'Dispatched' ? 'In-Transit' : 'Delivered';
-                        await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({'status': newStatus});
-                        
-                        // কাস্টমারকে নোটিফিকেশন পাঠানো
-                        String msg = newStatus == 'In-Transit' ? 'is on the way to your address 🛵' : 'has been delivered successfully ✅';
-                        await FirebaseFirestore.instance.collection('notifications').add({
-                          'target_user_id': data['user_id'],
-                          'title': 'Delivery Update',
-                          'message': 'Your order #$orderId $msg',
-                          'sent_at': FieldValue.serverTimestamp(),
-                        });
+                        if (status == 'Dispatched') {
+                          // Pick Up এ চাপলে In-Transit হবে
+                          await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({'status': 'In-Transit'});
+                          await FirebaseFirestore.instance.collection('notifications').add({
+                            'target_user_id': data['user_id'],
+                            'title': 'Order Picked Up 🛵',
+                            'message': 'Your order #$orderId is on the way to your address.',
+                            'sent_at': FieldValue.serverTimestamp(),
+                          });
+                          if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order Picked Up! Move to In-Transit tab.')));
+                        } else if (status == 'In-Transit') {
+                          // Deliver Now তে চাপলে Active Route (৩ নাম্বার) পেজে পাঠিয়ে দিবে
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Go to the ROUTE tab to complete delivery.')));
+                        }
                       }, 
                       child: Text(actionText, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
                     )
@@ -6745,10 +7093,178 @@ class RiderTaskManagement extends StatelessWidget {
 }
 
 // ==========================================
-// রাইডার পেজ ৩: Active Route / Order Details (Live Navigation)
+// রাইডার পেজ ৩: Active Route (Proof of Delivery + Failed Logic)
 // ==========================================
-class RiderOrderDetails extends StatelessWidget {
+class RiderOrderDetails extends StatefulWidget {
   const RiderOrderDetails({super.key});
+
+  @override
+  State<RiderOrderDetails> createState() => _RiderOrderDetailsState();
+}
+
+class _RiderOrderDetailsState extends State<RiderOrderDetails> {
+  final ImagePicker _picker = ImagePicker();
+
+  // সফল ডেলিভারি এবং প্রুফ (ছবি) আপলোড করার লজিক
+  Future<void> _processSuccessfulDelivery(QueryDocumentSnapshot doc, double cusLat, double cusLng) async {
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+      // ১. লোকেশন চেক (যদি কাস্টমারের লোকেশন থাকে)
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) throw 'Please enable GPS Location!';
+      
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) permission = await Geolocator.requestPermission();
+      
+      Position riderPos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+
+      // (টেস্টিংয়ের সুবিধার জন্য আপাতত দূরত্ব চেক অফ রাখছি বা ৫ কি.মি. দিচ্ছি। রিয়েল টাইমে এটি ৫০০ মিটার হবে)
+      if (cusLat != 0.0 && cusLng != 0.0) {
+        double dist = Geolocator.distanceBetween(riderPos.latitude, riderPos.longitude, cusLat, cusLng);
+        if (dist > 5000) { // 5 KM
+          throw 'You are too far (${(dist/1000).toStringAsFixed(1)} KM) from the customer address!';
+        }
+      }
+
+      if (!mounted) return;
+      Navigator.pop(context); // ক্লোজ প্রথম লোডিং
+
+      // ২. প্রুফ অফ ডেলিভারি (ক্যামেরা ওপেন করা)
+      final XFile? photo = await _picker.pickImage(source: ImageSource.camera, imageQuality: 50);
+      if (photo == null) return; // ছবি না তুললে ক্যান্সেল হবে
+
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[CircularProgressIndicator(), SizedBox(height:10), Text('Uploading Proof...', style: TextStyle(color: Colors.white))])));
+
+      // ৩. ছবি ফায়ারবেসে আপলোড
+      String fileName = 'proof_${doc.id}_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      Reference ref = FirebaseStorage.instance.ref().child('delivery_proofs').child(fileName);
+      await ref.putFile(File(photo.path));
+      String proofUrl = await ref.getDownloadURL();
+
+      // ৪. ডাটাবেস আপডেট
+      await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({
+        'status': 'Delivered',
+        'delivered_lat': riderPos.latitude,
+        'delivered_lng': riderPos.longitude,
+        'proof_image_url': proofUrl,
+        'delivered_at': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      Navigator.pop(context); // লোডিং বন্ধ
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delivery Completed successfully! ✅'), backgroundColor: Colors.green));
+
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
+    }
+  }
+
+  // ফেইলড ডেলিভারি লজিক (কারণ উল্লেখ করে)
+  void _processFailedDelivery(QueryDocumentSnapshot doc) {
+    String selectedReason = 'Customer not answering phone';
+    
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Report Failed Delivery', style: TextStyle(color: Colors.red)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children:[
+                const Text('Please select the exact reason why this delivery could not be completed:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 15),
+                DropdownButtonFormField<String>(
+                  value: selectedReason,
+                  isExpanded: true,
+                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
+                  items:[
+                    'Customer not answering phone',
+                    'Customer refused to take parcel',
+                    'Wrong or incomplete address',
+                    'Customer asked to reschedule',
+                    'Product damaged during transit'
+                  ].map((r) => DropdownMenuItem(value: r, child: Text(r, style: const TextStyle(fontSize: 13)))).toList(),
+                  onChanged: (val) => setDialogState(() => selectedReason = val!),
+                ),
+              ],
+            ),
+            actions:[
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () async {
+                  await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({
+                    'status': 'Delivery Failed',
+                    'failed_reason': selectedReason,
+                    'failed_at': FieldValue.serverTimestamp(),
+                  });
+                  if (context.mounted) {
+                    Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delivery marked as FAILED.'), backgroundColor: Colors.orange));
+                  }
+                }, 
+                child: const Text('Submit Report', style: TextStyle(color: Colors.white))
+              )
+            ],
+          );
+        }
+      )
+    );
+  }
+
+  // বটম শিট (অ্যাকশন মেনু)
+  void _showDeliveryActionMenu(QueryDocumentSnapshot doc, double cusLat, double cusLng) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              Container(width: 40, height: 5, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10))),
+              const SizedBox(height: 20),
+              const Text('Update Status', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 20),
+              
+              // Success Button
+              ListTile(
+                onTap: () {
+                  Navigator.pop(context);
+                  _processSuccessfulDelivery(doc, cusLat, cusLng);
+                },
+                tileColor: Colors.green.shade50,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                leading: const CircleAvatar(backgroundColor: Colors.green, child: Icon(Icons.check, color: Colors.white)),
+                title: const Text('Delivered Successfully', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                subtitle: const Text('Take a photo and complete order', style: TextStyle(fontSize: 11)),
+                trailing: const Icon(Icons.camera_alt, color: Colors.green),
+              ),
+              const SizedBox(height: 10),
+
+              // Failed Button
+              ListTile(
+                onTap: () {
+                  Navigator.pop(context);
+                  _processFailedDelivery(doc);
+                },
+                tileColor: Colors.red.shade50,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                leading: const CircleAvatar(backgroundColor: Colors.red, child: Icon(Icons.close, color: Colors.white)),
+                title: const Text('Delivery Failed', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                subtitle: const Text('Report an issue or return parcel', style: TextStyle(fontSize: 11)),
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
+        );
+      }
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -6759,11 +7275,10 @@ class RiderOrderDetails extends StatelessWidget {
       backgroundColor: Colors.grey.shade100,
       appBar: AppBar(backgroundColor: Colors.amber[100], elevation: 0, title: const Text('ACTIVE ROUTE', style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)), leading: const Icon(Icons.arrow_back_ios, color: Colors.black)),
       body: StreamBuilder<QuerySnapshot>(
-        // এই পেজটি শুধুমাত্র সেই অর্ডারটি দেখাবে যেটি বর্তমানে 'In-Transit' অবস্থায় আছে
         stream: FirebaseFirestore.instance.collection('orders')
             .where('assigned_rider_id', isEqualTo: currentUser.uid)
             .where('status', isEqualTo: 'In-Transit')
-            .limit(1) // একসাথে একটি ডেলিভারির রুট দেখাবে
+            .limit(1)
             .snapshots(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
@@ -6783,6 +7298,9 @@ class RiderOrderDetails extends StatelessWidget {
           var doc = snapshot.data!.docs.first;
           var data = doc.data() as Map<String, dynamic>;
           List<dynamic> items = data['items'] ??[];
+          
+          double cLat = data.containsKey('customer_lat') ? (data['customer_lat'] as num).toDouble() : 0.0;
+          double cLng = data.containsKey('customer_lng') ? (data['customer_lng'] as num).toDouble() : 0.0;
 
           return SingleChildScrollView(
             padding: const EdgeInsets.all(15),
@@ -6815,14 +7333,9 @@ class RiderOrderDetails extends StatelessWidget {
                               icon: const Icon(Icons.navigation, color: Colors.white, size: 18), 
                               label: const Text('Navigate', style: TextStyle(color: Colors.white)), 
                               onPressed: () async {
-                                // গুগল ম্যাপে রুট ওপেন করার লজিক
                                 String address = Uri.encodeComponent(data['shipping_address_text'] ?? '');
                                 final Uri googleMapsUrl = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$address");
-                                if (await canLaunchUrl(googleMapsUrl)) {
-                                  await launchUrl(googleMapsUrl);
-                                } else {
-                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open Google Maps.')));
-                                }
+                                if (await canLaunchUrl(googleMapsUrl)) await launchUrl(googleMapsUrl);
                               }
                             ),
                           ),
@@ -6830,7 +7343,6 @@ class RiderOrderDetails extends StatelessWidget {
                           ElevatedButton(
                             style: ElevatedButton.styleFrom(backgroundColor: Colors.blue), 
                             onPressed: () async {
-                              // কল করার লজিক
                               final Uri telUrl = Uri.parse("tel:${data['shipping_phone']}");
                               if (await canLaunchUrl(telUrl)) await launchUrl(telUrl);
                             }, 
@@ -6870,68 +7382,12 @@ class RiderOrderDetails extends StatelessWidget {
                 
                 const SizedBox(height: 20),
                 SizedBox(
-                  width: double.infinity, height: 50, 
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green), 
-                    onPressed: () async {
-                      // ১. লোডিং দেখানো
-                      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
-
-                      try {
-                        // ২. রাইডারের বর্তমান লোকেশন বের করা
-                        bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-                        if (!serviceEnabled) throw 'Please enable device GPS / Location!';
-                        
-                        LocationPermission permission = await Geolocator.checkPermission();
-                        if (permission == LocationPermission.denied) {
-                          permission = await Geolocator.requestPermission();
-                          if (permission == LocationPermission.denied) throw 'Location permission denied!';
-                        }
-
-                        Position riderPosition = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-
-                        // ৩. কাস্টমারের লোকেশন চেক করা (অর্ডার প্লেস করার সময় সেভ করা Lat/Lng)
-                        double customerLat = data.containsKey('customer_lat') ? (data['customer_lat'] as num).toDouble() : 0.0;
-                        double customerLng = data.containsKey('customer_lng') ? (data['customer_lng'] as num).toDouble() : 0.0;
-
-                        // যদি কাস্টমারের লোকেশন ম্যাপে দেওয়া থাকে, তবে দূরত্ব মাপবে
-                        if (customerLat != 0.0 && customerLng != 0.0) {
-                          double distanceInMeters = Geolocator.distanceBetween(
-                            riderPosition.latitude, riderPosition.longitude, 
-                            customerLat, customerLng
-                          );
-
-                          // যদি দূরত্ব ৫০০ মিটারের বেশি হয় (অর্থাৎ রাইডার অনেক দূরে আছে)
-                          if (distanceInMeters > 500) {
-                            if (context.mounted) Navigator.pop(context); // লোডিং বন্ধ
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                              content: Text('Error: আপনি কাস্টমারের ঠিকানা থেকে ${distanceInMeters.toStringAsFixed(0)} মিটার দূরে আছেন! সঠিক জায়গায় গিয়ে কনফার্ম করুন।'),
-                              backgroundColor: Colors.red,
-                              duration: const Duration(seconds: 4),
-                            ));
-                            return; // এখানেই আটকে দিবে, ডেলিভারি হবে না
-                          }
-                        }
-
-                        // ৪. দূরত্ব ঠিক থাকলে বা কাস্টমারের লোকেশন না থাকলে ডেলিভারি সম্পন্ন করবে
-                        // এবং লগ (Log) রাখার জন্য রাইডারের বর্তমান লোকেশন ফায়ারবেসে সেভ করে রাখবে
-                        await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({
-                          'status': 'Delivered',
-                          'delivered_lat': riderPosition.latitude,   // অ্যাডমিন প্রমাণের জন্য দেখতে পারবে
-                          'delivered_lng': riderPosition.longitude,
-                          'delivered_at': FieldValue.serverTimestamp(),
-                        });
-
-                        if (context.mounted) {
-                          Navigator.pop(context); // লোডিং বন্ধ
-                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delivery marked as Completed! ✅'), backgroundColor: Colors.green));
-                        }
-                      } catch (e) {
-                        if (context.mounted) Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
-                      }
-                    }, 
-                    child: const Text('Mark as Delivered', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
+                  width: double.infinity, height: 55, 
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), 
+                    onPressed: () => _showDeliveryActionMenu(doc, cLat, cLng), 
+                    icon: const Icon(Icons.update, color: Colors.white),
+                    label: const Text('UPDATE DELIVERY STATUS', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
                   )
                 )
               ],
@@ -7477,7 +7933,7 @@ class _RiderPaymentInfoPageState extends State<RiderPaymentInfoPage> {
 }
 
 // ==========================================
-// ক্যাটাগরি পেজ (রঙিন আইকন ও ১৮টি রিয়েল ক্যাটাগরি সহ)
+// ক্যাটাগরি পেজ (রঙিন আইকন ও ব্যাক বাটন সহ)
 // ==========================================
 class CategoryPage extends StatefulWidget {
   const CategoryPage({super.key});
@@ -7489,7 +7945,6 @@ class CategoryPage extends StatefulWidget {
 class _CategoryPageState extends State<CategoryPage> {
   int _selectedCategoryIndex = 0; 
 
-  // হোম পেজের সাথে মিল রেখে ১৮টি রঙিন ক্যাটাগরি
   final List<Map<String, dynamic>> mainCategories =[
     {'name': 'Fashion', 'icon': Icons.checkroom, 'color': Colors.pink}, 
     {'name': 'Electronics', 'icon': Icons.tv, 'color': Colors.blue},
@@ -7520,12 +7975,16 @@ class _CategoryPageState extends State<CategoryPage> {
       backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white, elevation: 1,
+        // [FIXED] ব্যাক বাটন যুক্ত করা হয়েছে যা হোম পেজে নিয়ে যাবে
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.black), 
+          onPressed: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()))
+        ),
         title: const Text('Categories', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
         centerTitle: true, actions:[IconButton(icon: const Icon(Icons.search, color: Colors.black), onPressed: () {})],
       ),
       body: Row(
         children:[
-          // বাম দিকের মেনু
           Container(
             width: 100, color: Colors.grey.shade50,
             child: ListView.builder(
@@ -7542,7 +8001,7 @@ class _CategoryPageState extends State<CategoryPage> {
                     ),
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
+                      children:[
                         Icon(mainCategories[index]['icon'], color: isSelected ? Colors.deepOrange : mainCategories[index]['color'], size: 24),
                         const SizedBox(height: 5),
                         Text(
@@ -7556,8 +8015,6 @@ class _CategoryPageState extends State<CategoryPage> {
               },
             ),
           ),
-
-          // ডান দিকের রিয়েল প্রোডাক্ট গ্রিড
           Expanded(
             child: Container(
               color: Colors.white, padding: const EdgeInsets.all(15),
@@ -7570,7 +8027,7 @@ class _CategoryPageState extends State<CategoryPage> {
                     child: StreamBuilder(
                       stream: FirebaseFirestore.instance.collection('products')
                           .where('status', isEqualTo: 'approved')
-                          .where('category', isEqualTo: mainCategories[_selectedCategoryIndex]['name']) // ক্যাটাগরির নাম ম্যাচ করানো হলো
+                          .where('category', isEqualTo: mainCategories[_selectedCategoryIndex]['name'])
                           .snapshots(),
                       builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
                         if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
@@ -7593,7 +8050,6 @@ class _CategoryPageState extends State<CategoryPage> {
     );
   }
 
-  // রিয়েল প্রোডাক্ট কার্ড ডিজাইনের হেল্পার ফাংশন
   Widget _buildRealProductCard(BuildContext context, QueryDocumentSnapshot product) {
     Map<String, dynamic> data = product.data() as Map<String, dynamic>;
     List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] :[];
@@ -7994,7 +8450,7 @@ class _AddressListPageState extends State<AddressListPage> {
 }
 
 // ==========================================
-// কাস্টমারের অর্ডার হিস্ট্রি পেজ (Order Tracking)
+// কাস্টমারের অর্ডার হিস্ট্রি পেজ (Order Tracking - Index Error Fixed)
 // ==========================================
 class OrderHistoryPage extends StatelessWidget {
   const OrderHistoryPage({super.key});
@@ -8003,7 +8459,6 @@ class OrderHistoryPage extends StatelessWidget {
   Future<void> generateAndPrintInvoice(Map<String, dynamic> data, String orderId) async {
     final pdf = pw.Document();
 
-    // তারিখ ঠিক করা
     String dateString = 'Unknown Date';
     if (data['order_date'] != null) {
       DateTime date = (data['order_date'] as Timestamp).toDate();
@@ -8019,7 +8474,6 @@ class OrderHistoryPage extends StatelessWidget {
           return pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children:[
-              // হেডার (দোকানের নাম ও টাইটেল)
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children:[
@@ -8028,8 +8482,6 @@ class OrderHistoryPage extends StatelessWidget {
                 ],
               ),
               pw.SizedBox(height: 30),
-
-              // অর্ডার এবং কাস্টমারের তথ্য
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children:[
@@ -8055,14 +8507,12 @@ class OrderHistoryPage extends StatelessWidget {
                 ],
               ),
               pw.SizedBox(height: 30),
-
-              // প্রোডাক্টের লিস্ট (টেবিল)
               pw.Table.fromTextArray(
                 headers:['Item Description', 'Qty', 'Unit Price', 'Total'],
                 data: items.map((item) {
                   int qty = int.tryParse(item['quantity'].toString()) ?? 1;
                   double price = double.tryParse(item['price'].toString()) ?? 0.0;
-                  return [
+                  return[
                     item['product_name'].toString(),
                     qty.toString(),
                     'Tk ${price.toStringAsFixed(0)}',
@@ -8075,34 +8525,22 @@ class OrderHistoryPage extends StatelessWidget {
                 cellPadding: const pw.EdgeInsets.all(8),
               ),
               pw.SizedBox(height: 20),
-
-              // সর্বমোট টাকার হিসাব
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.end,
                 children:[
-                  pw.Text(
-                    'Grand Total: Tk ${data['total_amount']}', 
-                    style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: PdfColors.deepOrange)
-                  ),
+                  pw.Text('Grand Total: Tk ${data['total_amount']}', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: PdfColors.deepOrange)),
                 ],
               ),
-
               pw.SizedBox(height: 50),
               pw.Divider(),
-              pw.Center(
-                child: pw.Text('Thank you for shopping with D Shop!', style: pw.TextStyle(fontSize: 12, fontStyle: pw.FontStyle.italic))
-              ),
+              pw.Center(child: pw.Text('Thank you for shopping with D Shop!', style: pw.TextStyle(fontSize: 12, fontStyle: pw.FontStyle.italic))),
             ],
           );
         },
       ),
     );
 
-    // পিডিএফ প্রিভিউ ও সেভ/প্রিন্ট অপশন চালু করা
-    await Printing.layoutPdf(
-      onLayout: (PdfPageFormat format) async => pdf.save(),
-      name: 'Invoice_${orderId.substring(0, 8)}.pdf',
-    );
+    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'Invoice_${orderId.substring(0, 8)}.pdf');
   }
 
   @override
@@ -8111,7 +8549,7 @@ class OrderHistoryPage extends StatelessWidget {
     if (user == null) return const Scaffold(body: Center(child: Text('Please login')));
 
     return DefaultTabController(
-      length: 4, // ৪টি ট্যাব থাকবে
+      length: 4, 
       child: Scaffold(
         backgroundColor: Colors.grey[100],
         appBar: AppBar(
@@ -8119,49 +8557,34 @@ class OrderHistoryPage extends StatelessWidget {
           backgroundColor: Colors.deepOrange,
           leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pop(context)),
           bottom: const TabBar(
-            isScrollable: true,
-            labelColor: Colors.white,
-            unselectedLabelColor: Colors.white70,
-            indicatorColor: Colors.white,
-            tabs:[
-              Tab(text: 'All Orders'),
-              Tab(text: 'Pending'),
-              Tab(text: 'Shipped'),
-              Tab(text: 'Delivered'),
-            ],
+            isScrollable: true, labelColor: Colors.white, unselectedLabelColor: Colors.white70, indicatorColor: Colors.white,
+            tabs:[Tab(text: 'All Orders'), Tab(text: 'Pending'), Tab(text: 'Shipped'), Tab(text: 'Delivered')],
           ),
         ),
-        
-        // ফায়ারবেস থেকে ইউজারের সব অর্ডার নিয়ে আসা হচ্ছে (নতুনগুলো আগে)
         body: StreamBuilder(
-          stream: FirebaseFirestore.instance
-              .collection('orders')
-              .where('user_id', isEqualTo: user.uid)
-              .orderBy('order_date', descending: true)
-              .snapshots(),
+          // [FIXED] .orderBy বাদ দেওয়া হয়েছে
+          stream: FirebaseFirestore.instance.collection('orders').where('user_id', isEqualTo: user.uid).snapshots(),
           builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
             if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children:[
-                    Icon(Icons.receipt_long, size: 60, color: Colors.grey.shade300),
-                    const SizedBox(height: 10),
-                    const Text('No orders found!', style: TextStyle(color: Colors.grey, fontSize: 16)),
-                  ]
-                )
-              );
+              return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(Icons.receipt_long, size: 60, color: Colors.grey.shade300), const SizedBox(height: 10), const Text('No orders found!', style: TextStyle(color: Colors.grey, fontSize: 16))]));
             }
 
-            var allOrders = snapshot.data!.docs;
+            // অ্যাপের ভেতরে সাজানো হচ্ছে (Local Sorting)
+            var allOrders = snapshot.data!.docs.toList();
+            allOrders.sort((a, b) {
+              Timestamp? tA = (a.data() as Map<String, dynamic>)['order_date'] as Timestamp?;
+              Timestamp? tB = (b.data() as Map<String, dynamic>)['order_date'] as Timestamp?;
+              if (tA == null || tB == null) return 0;
+              return tB.compareTo(tA);
+            });
 
             return TabBarView(
               children:[
-                _buildOrderList(allOrders), // সব অর্ডার
-                _buildOrderList(allOrders.where((doc) => doc['status'] == 'Pending').toList()), // শুধু পেন্ডিং
-                _buildOrderList(allOrders.where((doc) => doc['status'] == 'Shipped').toList()), // শুধু শিপড
-                _buildOrderList(allOrders.where((doc) => doc['status'] == 'Delivered').toList()), // শুধু ডেলিভারড
+                _buildOrderList(allOrders), 
+                _buildOrderList(allOrders.where((doc) => (doc.data() as Map<String, dynamic>)['status'] == 'Pending').toList()), 
+                _buildOrderList(allOrders.where((doc) => (doc.data() as Map<String, dynamic>)['status'] == 'Dispatched' || (doc.data() as Map<String, dynamic>)['status'] == 'Shipped').toList()), 
+                _buildOrderList(allOrders.where((doc) => (doc.data() as Map<String, dynamic>)['status'] == 'Delivered').toList()), 
               ],
             );
           },
@@ -8170,11 +8593,8 @@ class OrderHistoryPage extends StatelessWidget {
     );
   }
 
-  // অর্ডার লিস্ট ডিজাইনের হেল্পার ফাংশন
   Widget _buildOrderList(List<QueryDocumentSnapshot> orders) {
-    if (orders.isEmpty) {
-      return const Center(child: Text('No orders in this status.', style: TextStyle(color: Colors.grey)));
-    }
+    if (orders.isEmpty) return const Center(child: Text('No orders in this status.', style: TextStyle(color: Colors.grey)));
 
     return ListView.builder(
       padding: const EdgeInsets.all(15),
@@ -8184,19 +8604,16 @@ class OrderHistoryPage extends StatelessWidget {
         Map<String, dynamic> data = order.data() as Map<String, dynamic>;
         List<dynamic> items = data['items'] ??[];
         
-        // তারিখ বের করা
         String dateString = 'Unknown Date';
         if (data['order_date'] != null) {
           DateTime date = (data['order_date'] as Timestamp).toDate();
-          // সহজ ফরম্যাট: দিন/মাস/বছর
           dateString = '${date.day}/${date.month}/${date.year}';
         }
 
-        // স্ট্যাটাস অনুযায়ী কালার চেঞ্জ
-        Color statusColor = Colors.orange; // Pending এর জন্য কমলা
-        if (data['status'] == 'Shipped') statusColor = Colors.blue;
+        Color statusColor = Colors.orange; 
+        if (data['status'] == 'Shipped' || data['status'] == 'Dispatched') statusColor = Colors.blue;
         if (data['status'] == 'Delivered') statusColor = Colors.green;
-        if (data['status'] == 'Cancelled') statusColor = Colors.red;
+        if (data['status'] == 'Cancelled' || data['status'] == 'Delivery Failed') statusColor = Colors.red;
 
         return Card(
           margin: const EdgeInsets.only(bottom: 15),
@@ -8206,45 +8623,26 @@ class OrderHistoryPage extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children:[
-                // হেডার (Order ID ও স্ট্যাটাস)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children:[
                     Text('Order ID: ${order.id.substring(0, 8).toUpperCase()}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                      decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
-                      child: Text(data['status'], style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12)),
-                    ),
+                    Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3), decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), child: Text(data['status'] ?? 'Pending', style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12))),
                   ],
                 ),
                 const SizedBox(height: 5),
                 Text('Date: $dateString', style: const TextStyle(color: Colors.grey, fontSize: 12)),
                 const Divider(height: 20),
                 
-                // অর্ডার করা আইটেমগুলোর লিস্ট
                 ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: items.length,
+                  shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), itemCount: items.length,
                   itemBuilder: (context, i) {
                     var item = items[i];
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 5.0),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children:[
-                          Expanded(child: Text('${item['quantity']}x ${item['product_name']}', maxLines: 1, overflow: TextOverflow.ellipsis)),
-                          Text('৳${item['price']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                    );
+                    return Padding(padding: const EdgeInsets.only(bottom: 5.0), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[Expanded(child: Text('${item['quantity']}x ${item['product_name']}', maxLines: 1, overflow: TextOverflow.ellipsis)), Text('৳${item['price']}', style: const TextStyle(fontWeight: FontWeight.bold))]));
                   }
                 ),
-                
                 const Divider(height: 20),
                 
-                // ফুটার (Total Amount এবং Invoice Button)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children:[
@@ -8255,19 +8653,10 @@ class OrderHistoryPage extends StatelessWidget {
                         Text('৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 16)),
                       ],
                     ),
-                    
-                    // নতুন: ইনভয়েস ডাউনলোড বাটন
                     OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.teal,
-                        side: const BorderSide(color: Colors.teal),
-                      ),
-                      icon: const Icon(Icons.receipt_long, size: 16),
-                      label: const Text('Invoice'),
-                      onPressed: () {
-                        // ইনভয়েস ফাংশন কল করা হচ্ছে
-                        generateAndPrintInvoice(data, order.id);
-                      },
+                      style: OutlinedButton.styleFrom(foregroundColor: Colors.teal, side: const BorderSide(color: Colors.teal)),
+                      icon: const Icon(Icons.receipt_long, size: 16), label: const Text('Invoice'),
+                      onPressed: () => generateAndPrintInvoice(data, order.id),
                     )
                   ],
                 ),
