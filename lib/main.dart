@@ -1215,11 +1215,56 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
   void addToCart(BuildContext context, String imageUrl, int finalPrice, int currentStock, bool requireVariants, {bool isBuyNow = false}) async {
     User? user = FirebaseAuth.instance.currentUser;
     
+    // =====================================
+    // [RESTORED] লগিন না থাকলে সুন্দর পপ-আপ আসবে
+    // =====================================
     if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে লগিন করুন!')));
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          contentPadding: const EdgeInsets.all(20),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              const Icon(Icons.lock_outline, size: 60, color: Colors.deepOrange),
+              const SizedBox(height: 15),
+              const Text('লগিন প্রয়োজন!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              const Text('অর্ডার করতে বা কার্টে অ্যাড করতে দয়া করে লগিন করুন।', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
+              const SizedBox(height: 25),
+              Row(
+                children:[
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.grey), padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () => Navigator.pop(context), 
+                      child: const Text('Skip', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))
+                    )
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                      }, 
+                      child: const Text('Login Now', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                    )
+                  ),
+                ]
+              )
+            ],
+          ),
+        )
+      );
       return; 
     }
 
+    // =====================================
+    // [NEW] ভেরিয়েন্ট চেক, অটো-স্ক্রল ও ব্লিঙ্ক এনিমেশন
+    // =====================================
     if (requireVariants && (selectedColorName == null || selectedSizeName == null)) { 
       if (_variantKey.currentContext != null) {
         Scrollable.ensureVisible(_variantKey.currentContext!, alignment: 0.5, duration: const Duration(milliseconds: 500), curve: Curves.easeInOut);
@@ -1231,6 +1276,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
       return; 
     }
 
+    // স্টক চেক
     if (currentStock < 1) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দুঃখিত, এই ভেরিয়েন্টটি স্টকে নেই!'), backgroundColor: Colors.red));
       return;
@@ -1238,9 +1284,10 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
 
     if (!isBuyNow) runAddToCartAnimation(imageUrl);
 
+    // কার্টে অ্যাড করার লজিক
     var cartRef = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart');
     var existingItem = await cartRef
-        .where('product_id', isEqualTo: widget.product.id) // নতুন ফিক্স: product_id সেভ হচ্ছে
+        .where('product_id', isEqualTo: widget.product.id) // product_id সেভ হচ্ছে
         .where('selected_color', isEqualTo: selectedColorName ?? '')
         .where('selected_size', isEqualTo: selectedSizeName ?? '')
         .get();
@@ -1260,7 +1307,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     } else {
       Map<String, dynamic> pData = widget.product.data() as Map<String, dynamic>;
       var newDoc = await cartRef.add({
-        'product_id': widget.product.id, // অর্ডার প্লেস করার সময় কাজে লাগবে
+        'product_id': widget.product.id, 
         'product_name': pData['product_name'],
         'price': finalPrice, 
         'original_price': pData['original_price'] ?? pData['price'],
@@ -1304,6 +1351,60 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
       'category': widget.product['category'],
       'viewed_at': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  // =====================================
+  // ছোট প্রোডাক্ট কার্ড বানানোর হেল্পার ফাংশন
+  // =====================================
+  Widget _buildMiniProductCard(QueryDocumentSnapshot doc, {bool isGrid = false}) {
+    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+    List<dynamic> images = data.containsKey('image_urls') ? data['image_urls'] :[];
+    String firstImage = images.isNotEmpty ? images[0] : '';
+    
+    String displayPrice = data.containsKey('discount_price') && data['discount_price'].toString().isNotEmpty ? data['discount_price'].toString() : data['price'].toString();
+    int curP = int.tryParse(displayPrice) ?? 0;
+    int origP = int.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : '0') ?? 0;
+    int discount = origP > curP ? (((origP - curP) / origP) * 100).round() : 0;
+
+    return InkWell(
+      onTap: () {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: doc)));
+      },
+      child: Container(
+        width: isGrid ? null : 140,
+        margin: isGrid ? null : const EdgeInsets.only(right: 10),
+        decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.grey.shade200), borderRadius: BorderRadius.circular(8)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children:[
+            Expanded(
+              child: Stack(
+                children:[
+                  Container(
+                    width: double.infinity,
+                    decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(8))),
+                    child: firstImage.isNotEmpty ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(8)), child: Image.network(firstImage, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey),
+                  ),
+                  if (discount > 0)
+                    Positioned(top: 0, right: 0, child: Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: const BoxDecoration(color: Colors.red, borderRadius: BorderRadius.only(topRight: Radius.circular(8), bottomLeft: Radius.circular(8))), child: Text('-$discount%', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)))),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children:[
+                  Text(data['product_name'] ?? '', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                  const SizedBox(height: 4),
+                  Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14)),
+                ],
+              ),
+            )
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -1505,6 +1606,87 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
                         ),
                       ],
                     ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // =====================================
+                  // RESTORED: More from this Shop
+                  // =====================================
+                  if (data['seller_id'] != null)
+                    Container(
+                      color: Colors.white, padding: const EdgeInsets.all(15),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children:[
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children:[
+                              const Text('MORE FROM THIS SHOP', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                              Text('See All >', style: TextStyle(color: Colors.deepOrange.shade400, fontSize: 12)),
+                            ],
+                          ),
+                          const SizedBox(height: 15),
+                          SizedBox(
+                            height: 180,
+                            child: StreamBuilder(
+                              stream: FirebaseFirestore.instance.collection('products')
+                                  .where('seller_id', isEqualTo: data['seller_id'])
+                                  .where('status', isEqualTo: 'approved')
+                                  .limit(10) // সর্বোচ্চ ১০টি আনবে
+                                  .snapshots(),
+                              builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+                                 if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+                                 // এই সেম প্রোডাক্টটি লিস্ট থেকে বাদ দেওয়া
+                                 var docs = snapshot.data!.docs.where((d) => d.id != widget.product.id).toList();
+                                 if (docs.isEmpty) return const Text('No other products from this shop.', style: TextStyle(color: Colors.grey));
+                                 
+                                 return ListView.builder(
+                                   scrollDirection: Axis.horizontal,
+                                   itemCount: docs.length,
+                                   itemBuilder: (context, index) => _buildMiniProductCard(docs[index])
+                                 );
+                              }
+                            )
+                          )
+                        ]
+                      )
+                    ),
+                  const SizedBox(height: 10),
+
+                  // =====================================
+                  // RESTORED: Similar Products
+                  // =====================================
+                  Container(
+                    color: Colors.white, padding: const EdgeInsets.all(15),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children:[
+                         const Text('SIMILAR PRODUCTS', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                         const SizedBox(height: 15),
+                         StreamBuilder(
+                            stream: FirebaseFirestore.instance.collection('products')
+                                .where('category', isEqualTo: data['category'])
+                                .where('status', isEqualTo: 'approved')
+                                .limit(10)
+                                .snapshots(),
+                            builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+                               if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+                               var docs = snapshot.data!.docs.where((d) => d.id != widget.product.id).toList();
+                               if (docs.isEmpty) return const Text('No similar products found.', style: TextStyle(color: Colors.grey));
+                               
+                               return GridView.builder(
+                                 shrinkWrap: true,
+                                 physics: const NeverScrollableScrollPhysics(), // স্ক্রল অফ করা, যাতে মেইন পেজ স্ক্রল হয়
+                                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                   crossAxisCount: 2, childAspectRatio: 0.70, crossAxisSpacing: 10, mainAxisSpacing: 10
+                                 ),
+                                 itemCount: docs.length,
+                                 itemBuilder: (context, index) => _buildMiniProductCard(docs[index], isGrid: true)
+                               );
+                            }
+                          )
+                      ]
+                    )
                   ),
                   const SizedBox(height: 30),
                 ],
@@ -7275,7 +7457,7 @@ class RiderTaskManagement extends StatelessWidget {
 }
 
 // ==========================================
-// রাইডার পেজ ৩: Active Route (Proof of Delivery + Failed Logic)
+// রাইডার পেজ ৩: Active Route (Live GPS Broadcast & Proof of Delivery)
 // ==========================================
 class RiderOrderDetails extends StatefulWidget {
   const RiderOrderDetails({super.key});
@@ -7286,13 +7468,48 @@ class RiderOrderDetails extends StatefulWidget {
 
 class _RiderOrderDetailsState extends State<RiderOrderDetails> {
   final ImagePicker _picker = ImagePicker();
+  
+  //[NEW] জিপিএস ট্র্যাকিংয়ের জন্য ভেরিয়েবল
+  StreamSubscription<Position>? _positionStreamSubscription;
+  String? _currentlyTrackingOrderId;
+
+  @override
+  void dispose() {
+    // পেজ থেকে বের হলে জিপিএস ট্র্যাকিং বন্ধ করে দেবে, যাতে ব্যাটারি নষ্ট না হয়
+    _positionStreamSubscription?.cancel();
+    super.dispose();
+  }
+
+  // [NEW] লাইভ লোকেশন ফায়ারবেসে পাঠানোর ফাংশন
+  void _startLiveTracking(String orderId) async {
+    if (_currentlyTrackingOrderId == orderId) return; // আগে থেকেই এই অর্ডার ট্র্যাক হলে স্কিপ করবে
+    _currentlyTrackingOrderId = orderId;
+
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+    
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+
+    // প্রতি ১৫ মিটার পর পর লোকেশন আপডেট হবে
+    _positionStreamSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 15)
+    ).listen((Position position) {
+      FirebaseFirestore.instance.collection('orders').doc(orderId).update({
+        'rider_live_lat': position.latitude,
+        'rider_live_lng': position.longitude,
+      });
+    });
+  }
 
   // সফল ডেলিভারি এবং প্রুফ (ছবি) আপলোড করার লজিক
   Future<void> _processSuccessfulDelivery(QueryDocumentSnapshot doc, double cusLat, double cusLng) async {
     try {
       showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
 
-      // ১. লোকেশন চেক (যদি কাস্টমারের লোকেশন থাকে)
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) throw 'Please enable GPS Location!';
       
@@ -7301,30 +7518,33 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
       
       Position riderPos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
 
-      // (টেস্টিংয়ের সুবিধার জন্য আপাতত দূরত্ব চেক অফ রাখছি বা ৫ কি.মি. দিচ্ছি। রিয়েল টাইমে এটি ৫০০ মিটার হবে)
+      // দূরত্ব চেক (৫০০ মিটার)
       if (cusLat != 0.0 && cusLng != 0.0) {
         double dist = Geolocator.distanceBetween(riderPos.latitude, riderPos.longitude, cusLat, cusLng);
-        if (dist > 5000) { // 5 KM
-          throw 'You are too far (${(dist/1000).toStringAsFixed(1)} KM) from the customer address!';
+        if (dist > 500) { 
+          throw 'You are too far (${(dist).toStringAsFixed(0)} meters) from the customer address!';
         }
       }
 
       if (!mounted) return;
       Navigator.pop(context); // ক্লোজ প্রথম লোডিং
 
-      // ২. প্রুফ অফ ডেলিভারি (ক্যামেরা ওপেন করা)
+      // প্রুফ অফ ডেলিভারি (ক্যামেরা)
       final XFile? photo = await _picker.pickImage(source: ImageSource.camera, imageQuality: 50);
-      if (photo == null) return; // ছবি না তুললে ক্যান্সেল হবে
+      if (photo == null) return; 
 
       showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children:[CircularProgressIndicator(), SizedBox(height:10), Text('Uploading Proof...', style: TextStyle(color: Colors.white))])));
 
-      // ৩. ছবি ফায়ারবেসে আপলোড
       String fileName = 'proof_${doc.id}_${DateTime.now().millisecondsSinceEpoch}.jpg';
       Reference ref = FirebaseStorage.instance.ref().child('delivery_proofs').child(fileName);
       await ref.putFile(File(photo.path));
       String proofUrl = await ref.getDownloadURL();
 
-      // ৪. ডাটাবেস আপডেট
+      // ডেলিভারি সম্পন্ন হলে লাইভ ট্র্যাকিং বন্ধ করা
+      _positionStreamSubscription?.cancel();
+      _currentlyTrackingOrderId = null;
+
+      // ডাটাবেস আপডেট
       await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({
         'status': 'Delivered',
         'delivered_lat': riderPos.latitude,
@@ -7343,7 +7563,7 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
     }
   }
 
-  // ফেইলড ডেলিভারি লজিক (কারণ উল্লেখ করে)
+  // ফেইলড ডেলিভারি লজিক
   void _processFailedDelivery(QueryDocumentSnapshot doc) {
     String selectedReason = 'Customer not answering phone';
     
@@ -7378,6 +7598,9 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
               ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
                 onPressed: () async {
+                  _positionStreamSubscription?.cancel(); // ট্র্যাকিং বন্ধ
+                  _currentlyTrackingOrderId = null;
+                  
                   await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({
                     'status': 'Delivery Failed',
                     'failed_reason': selectedReason,
@@ -7397,7 +7620,6 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
     );
   }
 
-  // বটম শিট (অ্যাকশন মেনু)
   void _showDeliveryActionMenu(QueryDocumentSnapshot doc, double cusLat, double cusLng) {
     showModalBottomSheet(
       context: context,
@@ -7412,33 +7634,18 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
               const SizedBox(height: 20),
               const Text('Update Status', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 20),
-              
-              // Success Button
               ListTile(
-                onTap: () {
-                  Navigator.pop(context);
-                  _processSuccessfulDelivery(doc, cusLat, cusLng);
-                },
-                tileColor: Colors.green.shade50,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                onTap: () { Navigator.pop(context); _processSuccessfulDelivery(doc, cusLat, cusLng); },
+                tileColor: Colors.green.shade50, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 leading: const CircleAvatar(backgroundColor: Colors.green, child: Icon(Icons.check, color: Colors.white)),
-                title: const Text('Delivered Successfully', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
-                subtitle: const Text('Take a photo and complete order', style: TextStyle(fontSize: 11)),
-                trailing: const Icon(Icons.camera_alt, color: Colors.green),
+                title: const Text('Delivered Successfully', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)), subtitle: const Text('Take a photo and complete order', style: TextStyle(fontSize: 11)), trailing: const Icon(Icons.camera_alt, color: Colors.green),
               ),
               const SizedBox(height: 10),
-
-              // Failed Button
               ListTile(
-                onTap: () {
-                  Navigator.pop(context);
-                  _processFailedDelivery(doc);
-                },
-                tileColor: Colors.red.shade50,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                onTap: () { Navigator.pop(context); _processFailedDelivery(doc); },
+                tileColor: Colors.red.shade50, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 leading: const CircleAvatar(backgroundColor: Colors.red, child: Icon(Icons.close, color: Colors.white)),
-                title: const Text('Delivery Failed', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
-                subtitle: const Text('Report an issue or return parcel', style: TextStyle(fontSize: 11)),
+                title: const Text('Delivery Failed', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)), subtitle: const Text('Report an issue or return parcel', style: TextStyle(fontSize: 11)),
               ),
               const SizedBox(height: 10),
             ],
@@ -7465,16 +7672,9 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
           if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: const[
-                  Icon(Icons.map_outlined, size: 80, color: Colors.grey),
-                  SizedBox(height: 15),
-                  Text('No active delivery route right now.\nPlease pick up a task from the Tasks tab.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 16)),
-                ],
-              )
-            );
+            _positionStreamSubscription?.cancel(); // ডাটা না থাকলে ট্র্যাকিং অফ
+            _currentlyTrackingOrderId = null;
+            return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: const[Icon(Icons.map_outlined, size: 80, color: Colors.grey), SizedBox(height: 15), Text('No active delivery route right now.\nPlease pick up a task from the Tasks tab.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 16))]));
           }
 
           var doc = snapshot.data!.docs.first;
@@ -7483,6 +7683,9 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
           
           double cLat = data.containsKey('customer_lat') ? (data['customer_lat'] as num).toDouble() : 0.0;
           double cLng = data.containsKey('customer_lng') ? (data['customer_lng'] as num).toDouble() : 0.0;
+
+          // ডাটা পাওয়া মাত্রই লাইভ ট্র্যাকিং শুরু হবে
+          _startLiveTracking(doc.id);
 
           return SingleChildScrollView(
             padding: const EdgeInsets.all(15),
@@ -7506,7 +7709,6 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
                       Row(crossAxisAlignment: CrossAxisAlignment.start, children:[const Icon(Icons.location_on, size: 16, color: Colors.red), const SizedBox(width: 8), const Text('Address: ', style: TextStyle(fontWeight: FontWeight.bold)), Expanded(child: Text(data['shipping_address_text'] ?? 'No Address provided'))]), 
                       
                       const SizedBox(height: 15), 
-                      // Navigation & Call Buttons
                       Row(
                         children:[
                           Expanded(
@@ -8835,10 +9037,26 @@ class OrderHistoryPage extends StatelessWidget {
                         Text('৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 16)),
                       ],
                     ),
-                    OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(foregroundColor: Colors.teal, side: const BorderSide(color: Colors.teal)),
-                      icon: const Icon(Icons.receipt_long, size: 16), label: const Text('Invoice'),
-                      onPressed: () => generateAndPrintInvoice(data, order.id),
+                    Row(
+                      children: [
+                        // [NEW] লাইভ ট্র্যাকিং বাটন (যদি অর্ডার রাস্তায় থাকে)
+                        if (data['status'] == 'In-Transit')
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+                            icon: const Icon(Icons.map, size: 16, color: Colors.white), 
+                            label: const Text('Track Live', style: TextStyle(color: Colors.white, fontSize: 12)),
+                            onPressed: () {
+                              Navigator.push(context, MaterialPageRoute(builder: (context) => LiveTrackingPage(orderId: order.id)));
+                            },
+                          ),
+                        if (data['status'] == 'In-Transit') const SizedBox(width: 8),
+
+                        OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(foregroundColor: Colors.teal, side: const BorderSide(color: Colors.teal)),
+                          icon: const Icon(Icons.receipt_long, size: 16), label: const Text('Invoice'),
+                          onPressed: () => generateAndPrintInvoice(data, order.id),
+                        ),
+                      ],
                     )
                   ],
                 ),
@@ -10391,6 +10609,118 @@ class _AdminProfitLossReportPageState extends State<AdminProfitLossReportPage> {
             Text('৳${amount.toStringAsFixed(0)}', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color)),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ==========================================
+// নতুন পেজ: Live GPS Tracking Page (For Customer)
+// ==========================================
+class LiveTrackingPage extends StatefulWidget {
+  final String orderId;
+  const LiveTrackingPage({super.key, required this.orderId});
+
+  @override
+  State<LiveTrackingPage> createState() => _LiveTrackingPageState();
+}
+
+class _LiveTrackingPageState extends State<LiveTrackingPage> {
+  GoogleMapController? _mapController;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Live Delivery Tracking', style: TextStyle(color: Colors.white, fontSize: 16)),
+        backgroundColor: Colors.deepOrange,
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white), onPressed: () => Navigator.pop(context)),
+      ),
+      body: StreamBuilder<DocumentSnapshot>(
+        stream: FirebaseFirestore.instance.collection('orders').doc(widget.orderId).snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || !snapshot.data!.exists) return const Center(child: Text('অর্ডার ডাটা পাওয়া যায়নি!'));
+
+          var data = snapshot.data!.data() as Map<String, dynamic>;
+          
+          double cLat = data.containsKey('customer_lat') ? (data['customer_lat'] as num).toDouble() : 0.0;
+          double cLng = data.containsKey('customer_lng') ? (data['customer_lng'] as num).toDouble() : 0.0;
+          
+          double rLat = data.containsKey('rider_live_lat') ? (data['rider_live_lat'] as num).toDouble() : 0.0;
+          double rLng = data.containsKey('rider_live_lng') ? (data['rider_live_lng'] as num).toDouble() : 0.0;
+
+          // যদি রাইডারের লোকেশন না পাওয়া যায়
+          if (rLat == 0.0 || rLng == 0.0) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const[
+                  Icon(Icons.location_off, size: 80, color: Colors.grey),
+                  SizedBox(height: 15),
+                  Text('রাইডার এখনো জিপিএস অন করেননি। একটু অপেক্ষা করুন...', style: TextStyle(color: Colors.grey)),
+                ],
+              )
+            );
+          }
+
+          // মার্কার তৈরি করা (কাস্টমার = লাল, রাইডার = নীল/সবুজ)
+          Set<Marker> markers = {
+            if (cLat != 0.0 && cLng != 0.0)
+              Marker(
+                markerId: const MarkerId('customer_location'),
+                position: LatLng(cLat, cLng),
+                icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+                infoWindow: const InfoWindow(title: 'My Delivery Address'),
+              ),
+            Marker(
+              markerId: const MarkerId('rider_location'),
+              position: LatLng(rLat, rLng),
+              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue), // রাইডার ব্লু কালার
+              infoWindow: const InfoWindow(title: 'Rider is here! 🛵'),
+            )
+          };
+
+          // ক্যামেরা রাইডারের লোকেশনে ফোকাস করে রাখা
+          if (_mapController != null) {
+            _mapController!.animateCamera(CameraUpdate.newLatLng(LatLng(rLat, rLng)));
+          }
+
+          return Stack(
+            children:[
+              GoogleMap(
+                initialCameraPosition: CameraPosition(target: LatLng(rLat, rLng), zoom: 16),
+                markers: markers,
+                onMapCreated: (controller) => _mapController = controller,
+                myLocationEnabled: false,
+                zoomControlsEnabled: false,
+              ),
+              // নিচে একটি স্ট্যাটাস বক্স
+              Positioned(
+                bottom: 20, left: 20, right: 20,
+                child: Container(
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), boxShadow: const[BoxShadow(color: Colors.black26, blurRadius: 10)]),
+                  child: Row(
+                    children:[
+                      Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle), child: const Icon(Icons.motorcycle, color: Colors.blue)),
+                      const SizedBox(width: 15),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: const[
+                            Text('Rider is on the way!', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                            Text('আপনার পার্সেল নিয়ে রাইডার আপনার দিকে আসছেন।', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                          ],
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              )
+            ],
+          );
+        },
       ),
     );
   }
