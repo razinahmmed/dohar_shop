@@ -3337,7 +3337,7 @@ class ProductManagement extends StatelessWidget {
 }
 
 // ==========================================
-// নতুন পেজ: Edit Product Page (With Re-Approval Logic)
+// নতুন পেজ: Edit Product Page (Full Features & Smart Approval)
 // ==========================================
 class EditProductPage extends StatefulWidget {
   final String productId;
@@ -3352,17 +3352,49 @@ class EditProductPage extends StatefulWidget {
 class _EditProductPageState extends State<EditProductPage> {
   late TextEditingController nameController;
   late TextEditingController priceController;
+  late TextEditingController originalPriceController;
   late TextEditingController stockController;
   late TextEditingController descController;
+  late TextEditingController unitController;
+  
+  String? selectedCategory;
+  List<dynamic> existingImageUrls =[];
+  List<Map<String, dynamic>> variantMatrix =[];
+  
+  // ম্যাজিক বাটন: এটি অন থাকলে শুধু স্টক এডিট করা যাবে এবং এপ্রুভাল লাগবে না
+  bool isStockUpdateOnly = false; 
 
   @override
   void initState() {
     super.initState();
-    // আগের ডাটাগুলো বক্সে অটোমেটিক বসিয়ে দেওয়া হচ্ছে
-    nameController = TextEditingController(text: widget.productData['product_name']);
-    priceController = TextEditingController(text: widget.productData['price'].toString());
-    stockController = TextEditingController(text: widget.productData['stock'].toString());
-    descController = TextEditingController(text: widget.productData['description']);
+    var data = widget.productData;
+    
+    nameController = TextEditingController(text: data['product_name'] ?? '');
+    priceController = TextEditingController(text: data['price'].toString());
+    originalPriceController = TextEditingController(text: data['original_price']?.toString() ?? '');
+    stockController = TextEditingController(text: data['stock'].toString());
+    descController = TextEditingController(text: data['description'] ?? '');
+    unitController = TextEditingController(text: data['variant_unit'] ?? 'Unit');
+    selectedCategory = data['category'];
+    
+    if (data['image_urls'] != null) {
+      existingImageUrls = List<dynamic>.from(data['image_urls']);
+    }
+    
+    if (data['variants'] != null) {
+      // ডাটাবেস থেকে সেভ করা ম্যাট্রিক্স লোড করা হচ্ছে
+      variantMatrix = List<Map<String, dynamic>>.from(data['variants'].map((x) => Map<String, dynamic>.from(x)));
+    }
+  }
+
+  void _calculateTotalStock() {
+    int total = 0;
+    for (var item in variantMatrix) {
+      total += (item['stock'] ?? 0) as int;
+    }
+    setState(() {
+      stockController.text = total.toString();
+    });
   }
 
   void _updateProduct() async {
@@ -3374,21 +3406,52 @@ class _EditProductPageState extends State<EditProductPage> {
     try {
       showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
 
-      // আপনার লজিক অনুযায়ী: আপডেট করলে স্ট্যাটাস আবার 'pending' হয়ে যাবে
-      await FirebaseFirestore.instance.collection('products').doc(widget.productId).update({
-        'product_name': nameController.text.trim(),
-        'price': priceController.text.trim(),
-        'stock': stockController.text.trim(),
-        'description': descController.text.trim(),
-        'status': 'pending', // <--- Magic Line: Re-approval required
-        'updated_at': FieldValue.serverTimestamp(),
-      });
+      Map<String, dynamic> updateData = {};
+
+      if (isStockUpdateOnly) {
+        // যদি শুধু স্টক আপডেট করে (No approval needed)
+        updateData = {
+          'stock': stockController.text.trim(),
+          'variants': variantMatrix,
+          'updated_at': FieldValue.serverTimestamp(),
+        };
+      } else {
+        // যদি অন্য কিছু আপডেট করে (Requires Admin Approval)
+        updateData = {
+          'product_name': nameController.text.trim(),
+          'price': priceController.text.trim(),
+          'original_price': originalPriceController.text.trim(),
+          'stock': stockController.text.trim(),
+          'description': descController.text.trim(),
+          'category': selectedCategory,
+          'variant_unit': unitController.text.trim(),
+          'variants': variantMatrix,
+          'status': 'pending', // স্ট্যাটাস পেন্ডিং হয়ে যাবে
+          'updated_at': FieldValue.serverTimestamp(),
+        };
+      }
+
+      await FirebaseFirestore.instance.collection('products').doc(widget.productId).update(updateData);
+
+      // যদি পেন্ডিং হয়, তবে অ্যাডমিনকে নোটিফিকেশন পাঠাবে
+      if (!isStockUpdateOnly) {
+        await FirebaseFirestore.instance.collection('notifications').add({
+          'title': 'Product Edited & Pending 📦',
+          'message': 'A seller updated "${nameController.text.trim()}". Please review.',
+          'target_role': 'admin',
+          'sent_at': FieldValue.serverTimestamp(),
+        });
+      }
 
       if (!mounted) return;
       Navigator.pop(context); // Close loading
-      Navigator.pop(context); // Go back to management page
+      Navigator.pop(context); // Go back
       
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product updated! It is now pending for admin approval.')));
+      if (isStockUpdateOnly) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Stock updated instantly! ⚡', style: TextStyle(color: Colors.white)), backgroundColor: Colors.green));
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product updated! Waiting for admin approval. ⏳')));
+      }
     } catch (e) {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -3405,47 +3468,128 @@ class _EditProductPageState extends State<EditProductPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
+            // স্মার্ট স্টক আপডেট টগল
             Container(
-              padding: const EdgeInsets.all(15),
-              decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red.shade200)),
-              child: Row(
-                children: const[
-                  Icon(Icons.warning_amber_rounded, color: Colors.red),
-                  SizedBox(width: 10),
-                  Expanded(child: Text('Note: Updating product details will change its status back to PENDING. Admin will need to re-approve it.', style: TextStyle(color: Colors.red, fontSize: 12))),
-                ],
+              padding: const EdgeInsets.all(5),
+              decoration: BoxDecoration(color: isStockUpdateOnly ? Colors.green.shade50 : Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: isStockUpdateOnly ? Colors.green : Colors.red.shade200)),
+              child: SwitchListTile(
+                title: Text('Stock Update Only (Instant Live)', style: TextStyle(fontWeight: FontWeight.bold, color: isStockUpdateOnly ? Colors.green : Colors.red)),
+                subtitle: Text(isStockUpdateOnly ? 'Your product will remain live. You can only edit stock quantities.' : 'If you edit names, prices, or descriptions, the product will be PENDING for admin approval.', style: const TextStyle(fontSize: 11)),
+                value: isStockUpdateOnly,
+                activeColor: Colors.green,
+                onChanged: (val) => setState(() => isStockUpdateOnly = val),
               ),
             ),
             const SizedBox(height: 25),
             
+            // ছবি দেখানো (এডিট মোডে আপাতত শুধু দেখানো হচ্ছে)
+            const Text('Product Images', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 70,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: existingImageUrls.length,
+                itemBuilder: (context, index) {
+                  return Container(
+                    width: 70, margin: const EdgeInsets.only(right: 10),
+                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade300), image: DecorationImage(image: NetworkImage(existingImageUrls[index]), fit: BoxFit.cover)),
+                  );
+                }
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            DropdownButtonFormField<String>(
+              decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
+              value: selectedCategory,
+              items:['Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 'Watches', 'Baby & Toys', 'Groceries', 'Automotive', 'Women\'s Bags', 'Men\'s Wallets', 'Muslim Fashion', 'Games & Hobbies', 'Computers', 'Sports & Outdoor', 'Men Shoes', 'Cameras', 'Travel & Luggage'].map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(),
+              onChanged: isStockUpdateOnly ? null : (val) => setState(() => selectedCategory = val),
+            ),
+            const SizedBox(height: 15),
+
             TextField(
               controller: nameController, 
-              decoration: const InputDecoration(labelText: 'Product Name', border: OutlineInputBorder())
+              enabled: !isStockUpdateOnly, // অন থাকলে এডিট করা যাবে না
+              decoration: InputDecoration(labelText: 'Product Name', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder())
             ),
             const SizedBox(height: 15),
             
             Row(
               children:[
-                Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Price (৳)', border: OutlineInputBorder()))),
+                Expanded(child: TextField(controller: priceController, enabled: !isStockUpdateOnly, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'Base Price (৳)', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder()))),
                 const SizedBox(width: 10),
-                Expanded(child: TextField(controller: stockController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Stock Qty', border: OutlineInputBorder()))),
+                Expanded(child: TextField(controller: originalPriceController, enabled: !isStockUpdateOnly, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'Original Price (৳)', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder()))),
+                const SizedBox(width: 10),
+                Expanded(child: TextField(controller: stockController, readOnly: true, decoration: InputDecoration(labelText: 'Total Stock', filled: true, fillColor: Colors.amber.shade50, border: const OutlineInputBorder()))),
               ],
             ),
-            const SizedBox(height: 15),
+            const SizedBox(height: 20),
             
+            // ভেরিয়েন্ট এডিটর
+            const Text('Edit Variants & Stock', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(10)),
+              child: ListView.builder(
+                shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+                itemCount: variantMatrix.length,
+                itemBuilder: (context, index) {
+                  var item = variantMatrix[index];
+                  bool isFirst = index == 0;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Row(
+                      children:[
+                        Expanded(flex: 2, child: Text('${item['color']} - ${item['size']} ${unitController.text}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          flex: 1,
+                          child: TextFormField(
+                            initialValue: item['stock'].toString(),
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(labelText: 'Stock', isDense: true, border: OutlineInputBorder()),
+                            onChanged: (val) {
+                              variantMatrix[index]['stock'] = int.tryParse(val) ?? 0;
+                              _calculateTotalStock();
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          flex: 1,
+                          child: TextFormField(
+                            initialValue: item['price'].toString(),
+                            keyboardType: TextInputType.number,
+                            enabled: !isStockUpdateOnly && !isFirst, // স্টক মোডে এবং প্রথমটাতে দাম বদলানো যাবে না
+                            decoration: InputDecoration(labelText: '+ Price', isDense: true, filled: isStockUpdateOnly || isFirst, border: const OutlineInputBorder()),
+                            onChanged: (val) => variantMatrix[index]['price'] = int.tryParse(val) ?? 0,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+              ),
+            ),
+            const SizedBox(height: 20),
+
             TextField(
               controller: descController, 
+              enabled: !isStockUpdateOnly,
               maxLines: 4, 
-              decoration: const InputDecoration(labelText: 'Description', border: OutlineInputBorder())
+              decoration: InputDecoration(labelText: 'Description', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder())
             ),
             const SizedBox(height: 40),
             
             SizedBox(
               width: double.infinity, height: 50,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(backgroundColor: isStockUpdateOnly ? Colors.green : Colors.blue),
                 onPressed: _updateProduct, 
-                child: const Text('UPDATE & REQUEST APPROVAL', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                icon: Icon(isStockUpdateOnly ? Icons.flash_on : Icons.send, color: Colors.white),
+                label: Text(isStockUpdateOnly ? 'INSTANT UPDATE STOCK' : 'UPDATE & REQUEST APPROVAL', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
               ),
             )
           ],
@@ -3615,8 +3759,19 @@ class SellerOrderManagement extends StatelessWidget {
       return ElevatedButton.icon(
         style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
         onPressed: () async {
-          await FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Ready to Ship'});
+          await FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Ready to Ship', 'ready_to_ship_at': FieldValue.serverTimestamp()});
+          
+          // কাস্টমারকে নোটিফিকেশন
           await _sendCustomerNotification(customerId, orderId, 'packed and waiting for rider pickup');
+          
+          // অ্যাডমিনকে নোটিফিকেশন
+          await FirebaseFirestore.instance.collection('notifications').add({
+            'title': 'Order Ready to Ship 🚚',
+            'message': 'সেলার অর্ডার #${orderId.substring(0, 8).toUpperCase()} প্যাক করেছেন। দয়া করে রাইডার অ্যাসাইন করুন।',
+            'target_role': 'admin',
+            'sent_at': FieldValue.serverTimestamp(),
+          });
+
         }, 
         icon: const Icon(Icons.check_circle, color: Colors.white, size: 16), label: const Text('Pack Order', style: TextStyle(color: Colors.white))
       );
@@ -6311,7 +6466,7 @@ class _AdminOrderControlState extends State<AdminOrderControl> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children:[
                   Text('Status: $status', style: const TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
-                  _buildActionButton(doc.id, status),
+                  _buildActionButton(doc.id, status, data), // data পাস করা হলো
                 ],
               )
             ],
@@ -6321,10 +6476,35 @@ class _AdminOrderControlState extends State<AdminOrderControl> {
     );
   }
 
-  // [FIXED] অ্যাডমিন লজিক
-  Widget _buildActionButton(String orderId, String status) {
+  //[UPDATED] অ্যাডমিন লজিক ও নোটিফিকেশন
+  Widget _buildActionButton(String orderId, String status, Map<String, dynamic> orderData) {
     if (status == 'Pending') {
-      return ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.blue), onPressed: () => FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Processing'}), child: const Text('Confirm Order', style: TextStyle(color: Colors.white)));
+      return ElevatedButton(
+        style: ElevatedButton.styleFrom(backgroundColor: Colors.blue), 
+        onPressed: () async {
+          // ১. স্ট্যাটাস আপডেট
+          await FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Processing', 'processing_at': FieldValue.serverTimestamp()});
+          
+          // ২. এই অর্ডারে যেসব সেলারের প্রোডাক্ট আছে, তাদের সবাইকে নোটিফিকেশন পাঠানো
+          List<dynamic> items = orderData['items'] ??[];
+          Set<String> sellerIds = {};
+          for(var item in items) {
+            if(item['seller_id'] != null && item['seller_id'] != 'unknown') {
+              sellerIds.add(item['seller_id']);
+            }
+          }
+          
+          for(String sId in sellerIds) {
+            await FirebaseFirestore.instance.collection('notifications').add({
+              'target_user_id': sId,
+              'title': 'New Order to Process 📦',
+              'message': 'অ্যাডমিন একটি অর্ডার কনফার্ম করেছেন (#${orderId.substring(0, 8).toUpperCase()})। দয়া করে প্যাক করুন।',
+              'sent_at': FieldValue.serverTimestamp(),
+            });
+          }
+        }, 
+        child: const Text('Confirm Order', style: TextStyle(color: Colors.white))
+      );
     } 
     else if (status == 'Processing') {
       return const Text('Waiting for Seller', style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 12));
@@ -7434,18 +7614,30 @@ class RiderTaskManagement extends StatelessWidget {
                       style: ElevatedButton.styleFrom(backgroundColor: actionColor), 
                       onPressed: () async {
                         if (status == 'Dispatched') {
+                          // Pick Up এ চাপলে In-Transit হবে
                           await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({'status': 'In-Transit'});
+                          
+                          // কাস্টমারকে Out for Delivery নোটিফিকেশন
                           await FirebaseFirestore.instance.collection('notifications').add({
                             'target_user_id': data['user_id'],
-                            'title': 'Order Picked Up 🛵',
-                            'message': 'Your order #$orderId is on the way to your address.',
+                            'title': 'Out for Delivery 🛵',
+                            'message': 'আপনার পার্সেলটি রাইডারের কাছে দেওয়া হয়েছে এবং আপনার ঠিকানায় যাচ্ছে।',
                             'sent_at': FieldValue.serverTimestamp(),
                           });
+
+                          // অ্যাডমিনকে নোটিফিকেশন
+                          await FirebaseFirestore.instance.collection('notifications').add({
+                            'title': 'Rider Picked Up Parcel 📦',
+                            'message': 'অর্ডার #${orderId} রাইডার পিকআপ করেছেন এবং রাস্তায় আছেন।',
+                            'target_role': 'admin',
+                            'sent_at': FieldValue.serverTimestamp(),
+                          });
+
                           if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order Picked Up! Move to In-Transit tab.')));
                         } else if (status == 'In-Transit') {
                           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Go to the ROUTE tab to complete delivery.')));
                         }
-                      }, 
+                      },
                       child: Text(actionText, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
                     )
                 ],
@@ -8949,6 +9141,39 @@ class OrderHistoryPage extends StatelessWidget {
     );
   }
 
+  Widget _buildTimelineRow(String title, dynamic timestamp, bool isCompleted, {bool isLast = false}) {
+    String timeStr = '--';
+    if (timestamp != null && timestamp is Timestamp) {
+      DateTime dt = timestamp.toDate();
+      timeStr = '${dt.day}/${dt.month}/${dt.year} ${dt.hour > 12 ? dt.hour - 12 : dt.hour}:${dt.minute.toString().padLeft(2, '0')} ${dt.hour >= 12 ? 'PM' : 'AM'}';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Column(
+            children:[
+              Icon(isCompleted ? Icons.check_circle : Icons.radio_button_unchecked, size: 16, color: isCompleted ? Colors.teal : Colors.grey),
+              if (!isLast) Container(height: 15, width: 2, color: isCompleted ? Colors.teal : Colors.grey.shade300),
+            ],
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                Text(title, style: TextStyle(fontSize: 12, fontWeight: isCompleted ? FontWeight.bold : FontWeight.normal, color: isCompleted ? Colors.black87 : Colors.grey)),
+                if (isCompleted && timestamp != null) Text(timeStr, style: const TextStyle(fontSize: 10, color: Colors.teal)),
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
   Widget _buildOrderList(BuildContext context, List<QueryDocumentSnapshot> orders) {
     if (orders.isEmpty) return const Center(child: Text('No orders in this status.', style: TextStyle(color: Colors.grey)));
 
@@ -8985,13 +9210,34 @@ class OrderHistoryPage extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children:[
                     Text('Order ID: ${order.id.substring(0, 8).toUpperCase()}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                    Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3), decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), child: Text(status, style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12))),
+                    Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3), decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), child: Text(data['status'] ?? 'Pending', style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12))),
                   ],
                 ),
                 const SizedBox(height: 5),
-                Text('Date: $dateString', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                Text('Placed on: $dateString', style: const TextStyle(color: Colors.grey, fontSize: 12)),
                 const Divider(height: 20),
                 
+                // =====================================
+                //[NEW] Order Tracking Timeline
+                // =====================================
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: Colors.blueGrey.shade50, borderRadius: BorderRadius.circular(8)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children:[
+                      const Text('Order Tracking', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.blueGrey)),
+                      const SizedBox(height: 8),
+                      _buildTimelineRow('Order Placed', data['order_date'], true),
+                      _buildTimelineRow('Confirmed & Processing', data['processing_at'], data['status'] != 'Pending'),
+                      _buildTimelineRow('Packed & Ready', data['ready_to_ship_at'], ['Ready to Ship', 'Dispatched', 'In-Transit', 'Delivered'].contains(data['status'])),
+                      _buildTimelineRow('Handed to Courier/Rider', data['dispatched_at'],['Dispatched', 'In-Transit', 'Delivered'].contains(data['status'])),
+                      _buildTimelineRow('Delivered Successfully', data['delivered_at'], data['status'] == 'Delivered', isLast: true),
+                    ],
+                  ),
+                ),
+                const Divider(height: 20),
+
                 ListView.builder(
                   shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), itemCount: items.length,
                   itemBuilder: (context, i) {
