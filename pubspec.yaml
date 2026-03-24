@@ -1,0 +1,54 @@
+name: dohar_shop
+description: "A new Flutter project."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  device_info_plus: ^11.2.2  # <--- এই লাইনটি যোগ করুন
+  flutter_local_notifications: ^17.0.0
+  image_picker: ^1.2.1
+  firebase_storage: ^13.0.6
+  cupertino_icons: ^1.0.8
+  firebase_core: ^4.4.0
+  cloud_firestore: ^6.1.2
+  firebase_auth: ^6.1.4
+  file_picker: ^10.3.10
+  http: ^1.6.0
+  google_maps_flutter: ^2.14.2
+  geolocator: ^14.0.2
+  geocoding: ^4.0.0
+  url_launcher: ^6.3.2
+  shared_preferences: ^2.5.4
+  firebase_messaging: ^16.1.2
+  pdf: ^3.11.3
+  printing: ^5.14.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: "^0.13.1"
+
+# লোগো জেনারেটর কনফিগারেশন
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/images/dshop.png"
+  
+  # অ্যাডাপ্টিভ আইকন সেটিংস (কেটে যাওয়া বন্ধ করতে)
+  adaptive_icon_background: "#FFFFFF" # অথবা আপনার লোগোর ব্যাকগ্রাউন্ড কালার
+  adaptive_icon_foreground: "assets/images/dshop.png"
+
+flutter:
+  uses-material-design: true
+
+  # আপনার ইমেজ ফাইলগুলো এখানে রেজিস্টার করতে হবে
+  assets:
+    - assets/images/dshop.png
+    - assets/icons/
+

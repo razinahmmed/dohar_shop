@@ -1,0 +1,60 @@
+plugins {
+    id "com.android.application"
+    id "com.google.gms.google-services"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "com.example.dohar_shop"
+    // এটি ৩৬ করে দেওয়া হলো যাতে এরর না দেয়
+    compileSdk 36 
+
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+        freeCompilerArgs += ["-Xskip-metadata-version-check"]
+    }
+
+    defaultConfig {
+        applicationId "com.example.dohar_shop"
+        minSdkVersion flutter.minSdkVersion
+        targetSdk 35
+        versionCode flutter.versionCode
+        versionName flutter.versionName
+        multiDexEnabled true
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.debug
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.multidex:multidex:2.0.1'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+}
+
+// এই অংশটিই আসল সমাধান। এটি নতুন ভার্সনগুলোকে ব্লক করবে।
+configurations.all {
+    resolutionStrategy {
+        force 'androidx.activity:activity:1.9.3'
+        force 'androidx.activity:activity-ktx:1.9.3'
+        force 'androidx.core:core:1.13.1'
+        force 'androidx.core:core-ktx:1.13.1'
+        force 'androidx.browser:browser:1.8.0'
+        force 'androidx.lifecycle:lifecycle-common:2.8.7'
+        force 'androidx.lifecycle:lifecycle-runtime:2.8.7'
+        force 'androidx.lifecycle:lifecycle-viewmodel:2.8.7'
+        force 'androidx.navigationevent:navigationevent-android:1.0.0'
+    }
+}
