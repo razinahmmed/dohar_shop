@@ -13,6 +13,7 @@ import 'screens/customer_screens.dart';
 import 'screens/seller_screens.dart';
 import 'screens/admin_screens.dart';
 import 'screens/rider_screens.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ফাইলটির একদম শুরুতে এই Global Key টি ডিক্লেয়ার করুন (এটি নেভিগেশনের জন্য লাগবে)
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
@@ -20,12 +21,12 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 // 🔴 ১. ব্যাকগ্রাউন্ড মেসেজ হ্যান্ডলার (অ্যাপ বন্ধ থাকলেও এটি কাজ করবে)
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  // অ্যাপ বন্ধ থাকলে এই অংশটি ফায়ারবেস থেকে মেসেজ রিসিভ করে
   await Firebase.initializeApp();
   
-  // ব্যাকগ্রাউন্ডে রিংটোন বাজানোর জন্য এটি জরুরি
-  if (message.data['type'] == 'rider_job' || message.data['screen'] == 'rider_dashboard') {
-    // এখানে সরাসরি নোটিফিকেশন দেখানোর কোড কল করতে হবে
+  // [FIXED] সার্ভার থেকে type আসলে ব্যাকগ্রাউন্ডে রিংটোন বাজাবে
+  if (message.data['type'] == 'rider_job') {
+    NotificationService.triggerJobAlert(); // রিংটোন বাজবে!
+  } else {
     NotificationService.showBackgroundNotification(message);
   }
 }
@@ -122,79 +123,110 @@ class _AuthWrapperState extends State<AuthWrapper> {
       await NotificationService.init();
       User? user = FirebaseAuth.instance.currentUser;
 
+      // ইউজার লগইন না থাকলে সরাসরি মেইন স্ক্রিনে (লগইন পেজ) পাঠিয়ে দিবে
       if (user == null) {
-        if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const MainScreen()),
+          );
+        }
         return;
       }
 
-      // ১. ডাটাবেস থেকে ইউজারের রোল আনা
+      // ১. ফোনের লোকাল মেমোরি (SharedPreferences) থেকে রোল চেক করা
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+      String? savedRole = prefs.getString('user_role');
+
+      // ২. মেমোরিতে সেভ থাকলে লোডিং ছাড়াই অ্যাপ ওপেন হবে
+      if (savedRole != null && mounted) {
+        _navigateToScreen(savedRole); 
+        _syncRoleInBackground(user.uid, savedRole); // ব্যাকগ্রাউন্ডে চেক করবে রোল বদলেছে কি না
+        return;
+      }
+
+      // ৩. মেমোরিতে না থাকলে (যেমন: প্রথমবার লগইন) ডাটাবেস থেকে আনা হবে
       DocumentSnapshot doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
 
       if (doc.exists && mounted) {
-        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-        String role = data['role'] ?? 'customer';
-
-        // ২. নোটিফিকেশন পারমিশন ও টোকেন আপডেট
-        FirebaseMessaging messaging = FirebaseMessaging.instance;
-        await messaging.requestPermission(alert: true, badge: true, sound: true);
-
-        String? token = await messaging.getToken();
-        if (token != null) {
-          await FirebaseFirestore.instance.collection('users').doc(user.uid).update({'fcm_token': token});
-        }
-
-        // পুরনো সব টপিক থেকে আন-সাবস্ক্রাইব করা (যাতে জট না পাকায়)
-        await messaging.unsubscribeFromTopic('riders');
-        await messaging.unsubscribeFromTopic('sellers');
-        await messaging.unsubscribeFromTopic('admins');
-        await messaging.unsubscribeFromTopic('all_users');
-
-        // সব ইউজার (কাস্টমারসহ) এই টপিকটি সাবস্ক্রাইব করবে
-        await messaging.subscribeToTopic('all_users');
-
-        // ৩. রোল অনুযায়ী নির্দিষ্ট টপিক ও স্ক্রিনে পাঠানো
-        if (role == 'admin' || role == 'super_admin') {
-          await messaging.subscribeToTopic('admins'); // এডমিন টপিক
-          if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const AdminMainScreen()));
-        } 
-        else if (role == 'seller') {
-          await messaging.subscribeToTopic('sellers'); // সেলার টপিক
-          if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
-        } 
-        else if (role == 'rider') {
-          await messaging.subscribeToTopic('riders'); // রাইডার টপিক
-          if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const RiderMainScreen()));
-        } 
-        else {
-          // এটি শুধুমাত্র পিওর কাস্টমারদের জন্য
-          if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
-        }
-
+        String role = doc['role'] ?? 'customer';
+        
+        // মেমোরিতে রোল সেভ করে রাখা
+        await prefs.setString('user_role', role); 
+        
+        // [NEW] রোল অনুযায়ী নোটিফিকেশন টপিক আপডেট করা
+        await NotificationService.syncFcmTopics(role); 
+        
+        _navigateToScreen(role);
       } else {
-        // যদি ইউজার ডাটাবেসে না থাকে তবে কাস্টমার হিসেবে মেইন স্ক্রিনে যাবে
-        if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+        // যদি ডাটাবেসে ইউজার না থাকে
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const MainScreen()),
+          );
+        }
       }
     } catch (e) {
       debugPrint("Startup Error: $e");
-      // এরর হলে কাস্টমার মোডে পাঠিয়ে দেওয়া নিরাপদ
-      if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+      // এরর হলে কাস্টমার মোডে বা মেইন স্ক্রিনে পাঠিয়ে দেওয়া নিরাপদ
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const MainScreen()),
+        );
+      }
+    }
+  }
+
+  // এটি আপনার আগের নেভিগেশন লজিককে সহজ করার জন্য
+  void _navigateToScreen(String role) {
+    if (role == 'admin' || role == 'super_admin') {
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const AdminMainScreen()));
+    } else if (role == 'seller') {
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
+    } else if (role == 'rider') {
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const RiderMainScreen()));
+    } else {
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+    }
+  }
+
+  // ব্যাকগ্রাউন্ডে রোল চেক করার জন্য
+  void _syncRoleInBackground(String uid, String oldRole) async {
+    var doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+    if (doc.exists) {
+      String newRole = doc['role'] ?? 'customer';
+      if (newRole != oldRole) {
+        SharedPreferences prefs = await SharedPreferences.getInstance();
+        await prefs.setString('user_role', newRole);
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.deepOrange,
+      backgroundColor: Colors.white, // ব্যাকগ্রাউন্ড সাদা করা হলো লোগো ফোটার জন্য
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: const [
-            Icon(Icons.shopping_cart_checkout, size: 80, color: Colors.white),
-            SizedBox(height: 20),
-            CircularProgressIndicator(color: Colors.white),
-            SizedBox(height: 20),
-            Text('Verifying Identity...', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
-            Text('Please Wait...', style: TextStyle(color: Colors.white70, fontSize: 12)),
+          children: [
+            // আপনার অ্যাপের লোগো (আপনার লোগোর নাম বা ফোল্ডার আলাদা হলে path ঠিক করে দিবেন)
+            // যদি কোনো কারণে লোগো লোড না হয়, তবে আইকন দেখাবে
+            Image.asset(
+              'assets/images/launcher_dshop.png', // আপনার লোগোর পাথ
+              width: 120, 
+              height: 120,
+              errorBuilder: (context, error, stackTrace) => const Icon(Icons.shopping_bag, size: 80, color: Colors.deepOrange),
+            ),
+            const SizedBox(height: 30),
+            const CircularProgressIndicator(color: Colors.deepOrange),
+            const SizedBox(height: 20),
+            const Text(
+              'Loading D Shop...', 
+              style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 18)
+            ),
           ],
         ),
       ),

@@ -15,6 +15,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../notification_service.dart';
 // আমাদের নিজেদের ফাইলগুলোর লিংক (যাতে এক পেজ থেকে অন্য পেজে যাওয়া যায়)
@@ -128,6 +129,55 @@ class _RiderDashboardState extends State<RiderDashboard> {
     }
   }
 
+  // [NEW] ইনকামিং কলের মতো পপ-আপ
+  void _showIncomingJobPopup(String orderId, Map<String, dynamic> jobData) {
+    showDialog(
+      context: context,
+      barrierDismissible: false, // বাইরে ক্লিক করে কাটা যাবে না
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.black87,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.ring_volume, color: Colors.greenAccent, size: 60),
+            const SizedBox(height: 15),
+            const Text('NEW DELIVERY REQUEST!', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            Text('Drop-off: ${jobData['shipping_address_text']}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+            const SizedBox(height: 15),
+            Text('৳${jobData['total_amount']}', style: const TextStyle(color: Colors.amber, fontSize: 28, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 25),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                // Reject Button
+                InkWell(
+                  onTap: () {
+                    flutterLocalNotificationsPlugin.cancel(999); // রিংটোন বন্ধ করবে
+                    Navigator.pop(context); // কেটে দিবে
+                  },
+                  child: CircleAvatar(radius: 30, backgroundColor: Colors.red, child: const Icon(Icons.close, color: Colors.white, size: 30)),
+                ),
+                // Accept Button
+                InkWell(
+                  onTap: () {
+                    flutterLocalNotificationsPlugin.cancel(999); // রিংটোন বন্ধ করবে
+                    Navigator.pop(context); // পপআপ ক্লোজ
+                    _acceptDeliveryJob(orderId); // জব এক্সেপ্ট ফাংশন কল
+                  },
+                  child: CircleAvatar(radius: 35, backgroundColor: Colors.green, child: const Icon(Icons.motorcycle, color: Colors.white, size: 35)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            const Text('Fastest finger first!', style: TextStyle(color: Colors.grey, fontSize: 10)),
+          ],
+        ),
+      )
+    );
+  }
+
   //[NEW LOGIC] রাইডার জব এক্সেপ্ট করার ট্রানজেকশন
   Future<void> _acceptDeliveryJob(String orderId) async {
     User? user = FirebaseAuth.instance.currentUser;
@@ -155,10 +205,44 @@ class _RiderDashboardState extends State<RiderDashboard> {
           'status': 'Dispatched',
           'dispatched_at': FieldValue.serverTimestamp(),
         });
+      }); // Transaction শেষ
+
+      // [FIXED] নোটিফিকেশনের জন্য ডাটাটি নতুন করে রিড করে নেওয়া হলো
+      DocumentSnapshot orderSnap = await orderRef.get();
+      Map<String, dynamic> orderData = orderSnap.data() as Map<String, dynamic>;
+
+      // ফ্লো ৪: রাইডার এক্সেপ্ট করলে সবাইকে জানানো
+      // ১. কাস্টমারকে
+      if (orderData['user_id'] != null) {
+        await FirebaseFirestore.instance.collection('notifications').add({
+          'target_user_id': orderData['user_id'],
+          'title': 'Rider Assigned 🏍️',
+          'message': 'আপনার পার্সেলটি পিক করার জন্য রাইডার রওনা দিয়েছেন।',
+          'sent_at': FieldValue.serverTimestamp(),
+        });
+      }
+
+      // ২. সেলারকে
+      List items = orderData['items'] ?? [];
+      if (items.isNotEmpty && items[0]['seller_id'] != null) {
+        await FirebaseFirestore.instance.collection('notifications').add({
+          'target_user_id': items[0]['seller_id'],
+          'title': 'Rider is coming! 🛵',
+          'message': 'অর্ডার #${orderId.substring(0, 6)} পিক করতে রাইডার আসছেন। প্রস্তুত রাখুন।',
+          'sent_at': FieldValue.serverTimestamp(),
+        });
+      }
+
+      // ৩. অ্যাডমিনকে
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'title': 'Rider Assigned',
+        'message': 'অর্ডার #${orderId.substring(0, 6)} একজন রাইডার গ্রহণ করেছেন।',
+        'topic': 'admins',
+        'sent_at': FieldValue.serverTimestamp(),
       });
-      
+
       if (!mounted) return;
-      Navigator.pop(context);
+      Navigator.pop(context); // লোডিং ক্লোজ
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('অর্ডারটি আপনার জন্য অ্যাসাইন করা হয়েছে! 🚀 Tasks ট্যাবে যান।'), backgroundColor: Colors.green));
     } catch (e) {
       if (mounted) Navigator.pop(context);
@@ -275,12 +359,13 @@ class _RiderDashboardState extends State<RiderDashboard> {
                             return const SizedBox();
                           }
 
-                          // ✅ শুধুমাত্র নতুন জব আসলেই একবার রিংটোন বাজবে
+                          // ✅ শুধুমাত্র নতুন জব আসলেই একবার রিংটোন বাজবে এবং কল পপ-আপ আসবে
                           String currentJobId = openJobs.first.id;
                           if (_lastAlertedOrderId != currentJobId) {
                             _lastAlertedOrderId = currentJobId;
                             WidgetsBinding.instance.addPostFrameCallback((_) {
-                              NotificationService.triggerJobAlert();
+                              NotificationService.triggerJobAlert(); // রিংটোন বাজবে
+                              _showIncomingJobPopup(currentJobId, openJobs.first.data() as Map<String, dynamic>); // কল স্ক্রিন আসবে
                             });
                           }
 
@@ -731,6 +816,14 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
           'message': 'আপনার পার্সেলটি সফলভাবে ডেলিভারি করা হয়েছে। আপনি $earnedCoins D-Coins পেয়েছেন!',
           'sent_at': FieldValue.serverTimestamp(),
         });
+
+        // অ্যাডমিনকে নোটিফিকেশন
+        await FirebaseFirestore.instance.collection('notifications').add({
+          'title': 'Order Delivered ✅',
+          'message': 'অর্ডার #${doc.id.substring(0, 8).toUpperCase()} সফলভাবে ডেলিভারি হয়েছে।',
+          'topic': 'admins',
+          'sent_at': FieldValue.serverTimestamp(),
+        });
       }
 
       if (!mounted) return;
@@ -798,6 +891,13 @@ class _RiderOrderDetailsState extends State<RiderOrderDetails> {
                     'failed_reason': selectedReason,
                     'failed_proof_url': proofUrl,
                     'failed_at': FieldValue.serverTimestamp(),
+                  });
+
+                  await FirebaseFirestore.instance.collection('notifications').add({
+                    'title': 'Delivery Failed ❌',
+                    'message': 'অর্ডার #${doc.id.substring(0, 8).toUpperCase()} ডেলিভারি ফেইল হয়েছে। কারণ: $selectedReason',
+                    'topic': 'admins',
+                    'sent_at': FieldValue.serverTimestamp(),
                   });
 
                   if (context.mounted) {
@@ -1393,13 +1493,14 @@ class _RiderProfileState extends State<RiderProfile> {
                     const SizedBox(height: 30),
                     
                     TextButton.icon(
-                      onPressed: () async {
-                        // অফলাইন করে লগআউট করা
-                        if(currentUser != null) await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({'is_online': false});
-                        SharedPreferences prefs = await SharedPreferences.getInstance();
-                        await prefs.clear();
-                        await FirebaseAuth.instance.signOut(); 
-                        if(context.mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                      onPressed: () {
+                        Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginPage()), (route) => false);
+                        Future.microtask(() async {
+                          await NotificationService.syncFcmTopics('guest');
+                          SharedPreferences prefs = await SharedPreferences.getInstance();
+                          await prefs.clear();
+                          await FirebaseAuth.instance.signOut();
+                        });
                       }, 
                       icon: const Icon(Icons.logout, color: Colors.red),
                       label: const Text('Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 18))

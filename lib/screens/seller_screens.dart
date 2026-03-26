@@ -27,6 +27,8 @@ import 'customer_screens.dart';
 import 'seller_screens.dart';
 import 'admin_screens.dart';
 import 'rider_screens.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:dohar_shop/notification_service.dart';
 
 
 // ==========================================
@@ -535,22 +537,38 @@ class _EditProductPageState extends State<EditProductPage> {
     super.initState();
     var data = widget.productData;
     
-    nameController = TextEditingController(text: data['product_name'] ?? '');
-    priceController = TextEditingController(text: data['price'].toString());
-    originalPriceController = TextEditingController(text: data['original_price']?.toString() ?? '');
-    stockController = TextEditingController(text: data['stock'].toString());
-    descController = TextEditingController(text: data['description'] ?? '');
-    unitController = TextEditingController(text: data['variant_unit'] ?? 'Unit');
-    selectedCategory = data['category'];
+    // প্রতিটি ফিল্ডের জন্য null চেক এবং ডিফল্ট ভ্যালু সেট করা হয়েছে
+    nameController = TextEditingController(text: data['product_name']?.toString() ?? '');
     
-    if (data['image_urls'] != null) {
+    // Price এবং Stock ফিল্ডে null থাকলে '0' দেখাবে যাতে ক্রাশ না করে
+    priceController = TextEditingController(text: (data['price'] ?? 0).toString());
+    originalPriceController = TextEditingController(text: (data['original_price'] ?? data['price'] ?? 0).toString());
+    stockController = TextEditingController(text: (data['stock'] ?? 0).toString());
+    
+    descController = TextEditingController(text: data['description']?.toString() ?? '');
+    unitController = TextEditingController(text: data['variant_unit']?.toString() ?? 'Unit');
+    selectedCategory = data['category']?.toString();
+    
+    // ইমেজ লিস্ট লোড করার সময় সেফটি চেক
+    if (data['image_urls'] != null && data['image_urls'] is List) {
       existingImageUrls = List<dynamic>.from(data['image_urls']);
     }
     
-    if (data['variants'] != null) {
-      // ডাটাবেস থেকে সেভ করা ম্যাট্রিক্স লোড করা হচ্ছে
-      variantMatrix = List<Map<String, dynamic>>.from(data['variants'].map((x) => Map<String, dynamic>.from(x)));
+    // ভেরিয়েন্ট লিস্ট লোড করার সময় সেফটি চেক
+    if (data['variants'] != null && data['variants'] is List) {
+      try {
+        variantMatrix = List<Map<String, dynamic>>.from(
+          (data['variants'] as List).map((x) => Map<String, dynamic>.from(x))
+        );
+      } catch (e) {
+        print("Error parsing variants: $e");
+        variantMatrix = [];
+      }
     }
+
+    // যদি প্রডাক্টটি অলরেডি পেন্ডিং থাকে, তবে আমরা ডিফল্টভাবে 'isStockUpdateOnly' ফলস রাখবো 
+    // যাতে সেলার সবকিছু এডিট করতে পারে।
+    isStockUpdateOnly = false; 
   }
 
   void _calculateTotalStock() {
@@ -565,65 +583,80 @@ class _EditProductPageState extends State<EditProductPage> {
 
   void _updateProduct() async {
     if (nameController.text.isEmpty || priceController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Name and Price are required!')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Name and Price are required!'))
+      );
       return;
     }
 
     try {
-      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+      showDialog(
+        context: context, 
+        barrierDismissible: false, 
+        builder: (context) => const Center(child: CircularProgressIndicator())
+      );
+
+      // ১. প্রথমে বর্তমান স্ট্যাটাসটি দেখে নিন
+      String currentStatus = widget.productData['status'] ?? 'pending';
 
       Map<String, dynamic> updateData = {};
 
       if (isStockUpdateOnly) {
-        // যদি শুধু স্টক আপডেট করে (No approval needed)
+        // ২. যদি শুধু স্টক আপডেট মোড অন থাকে (এতে স্ট্যাটাস পরিবর্তন হবে না)
         updateData = {
-          'stock': stockController.text.trim(),
+          'stock': int.tryParse(stockController.text.trim()) ?? 0,
           'variants': variantMatrix,
           'updated_at': FieldValue.serverTimestamp(),
         };
       } else {
-        // যদি অন্য কিছু আপডেট করে (Requires Admin Approval)
+        // ৩. যদি ফুল এডিট করা হয় (নাম, দাম, বর্ণনা ইত্যাদি)
         updateData = {
           'product_name': nameController.text.trim(),
-          'price': priceController.text.trim(),
-          'original_price': originalPriceController.text.trim(),
-          'stock': stockController.text.trim(),
+          'price': int.tryParse(priceController.text.trim()) ?? 0,
+          'original_price': int.tryParse(originalPriceController.text.trim()) ?? 0,
+          'stock': int.tryParse(stockController.text.trim()) ?? 0,
           'description': descController.text.trim(),
           'category': selectedCategory,
           'variant_unit': unitController.text.trim(),
           'variants': variantMatrix,
-          'status': 'pending', // স্ট্যাটাস পেন্ডিং হয়ে যাবে
+          'status': 'pending', // যেকোনো ফুল এডিটে স্ট্যাটাস আবার পেন্ডিং হয়ে যাবে
           'updated_at': FieldValue.serverTimestamp(),
         };
       }
 
-      await FirebaseFirestore.instance.collection('products').doc(widget.productId).update(updateData);
+      // ৪. ডাটাবেস আপডেট
+      await FirebaseFirestore.instance
+          .collection('products')
+          .doc(widget.productId)
+          .update(updateData);
 
-      // যদি পেন্ডিং হয়, তবে অ্যাডমিনকে নোটিফিকেশন পাঠাবে
+      // ৫. অ্যাডমিন নোটিফিকেশন (যদি স্টক বাদে অন্য কিছু এডিট করা হয়)
       if (!isStockUpdateOnly) {
         await FirebaseFirestore.instance.collection('notifications').add({
-          'title': 'Product Edited & Pending 📦',
-          'message': 'একজন সেলার "${nameController.text.trim()}" আপডেট করেছেন। দয়া করে রিভিউ করুন।',
-          
-          // 👉 'target_role' এর বদলে 'target_user_id' ব্যবহার করুন
-          'target_user_id': 'আপনার_এডমিন_আইডি_এখানে_দিন', 
-          
+          'title': 'Product Updated 📦',
+          'message': 'সেলার "${nameController.text.trim()}" এডিট করেছেন। বর্তমান স্ট্যাটাস: পেন্ডিং।',
+          'target_role': 'admin', // এডমিন প্যানেলে দেখার জন্য
           'sent_at': FieldValue.serverTimestamp(),
         });
       }
 
       if (!mounted) return;
-      Navigator.pop(context); // Close loading
-      Navigator.pop(context); // Go back
+      Navigator.pop(context); // লোডিং বন্ধ
+      Navigator.pop(context); // পেজ থেকে বের হওয়া
       
-      if (isStockUpdateOnly) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Stock updated instantly! ⚡', style: TextStyle(color: Colors.white)), backgroundColor: Colors.green));
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product updated! Waiting for admin approval. ⏳')));
-      }
+      String msg = isStockUpdateOnly 
+          ? 'Stock updated instantly! ⚡' 
+          : 'Product updated and sent for approval! ⏳';
+          
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg), backgroundColor: isStockUpdateOnly ? Colors.green : Colors.blue)
+      );
+
     } catch (e) {
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      Navigator.pop(context); // ভুল হলে লোডিং বন্ধ
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red)
+      );
     }
   }
 
@@ -1502,7 +1535,7 @@ class SellerOrderManagement extends StatelessWidget {
                         child: const Text('Details', style: TextStyle(fontSize: 12, color: Colors.teal)),
                       ),
                       const SizedBox(width: 8),
-                      _buildSellerActionButton(context, doc.id, customerId, status, data),
+                      _buildSellerActionButton(context, doc.id, customerId, status, data, orders.length),
                     ],
                   )
                 ]
@@ -1514,7 +1547,7 @@ class SellerOrderManagement extends StatelessWidget {
     );
   }
 
-  Widget _buildSellerActionButton(BuildContext context, String orderId, String customerId, String status, Map<String, dynamic> orderData) {
+  Widget _buildSellerActionButton(BuildContext context, String orderId, String customerId, String status, Map<String, dynamic> orderData, int listLength) {
     if (status == 'Pending') {
       return const Text('Awaiting Admin', style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 11));
     } 
@@ -1526,16 +1559,29 @@ class SellerOrderManagement extends StatelessWidget {
             'status': 'Ready to Ship',
             'ready_to_ship_at': FieldValue.serverTimestamp(),
           });
+
+          // ✅ এখন আর লাল দাগ আসবে না, কারণ আমরা listLength ব্যবহার করছি
+          if (listLength <= 1) {
+            DefaultTabController.of(context).animateTo(1); 
+          }
           
           await _sendCustomerNotification(customerId, orderId, 'packed and waiting for rider pickup');
           
+          // রাইডারদের ব্রডকাস্ট (রিং বাজানোর জন্য type: rider_job দেওয়া হলো)
           await FirebaseFirestore.instance.collection('notifications').add({
             'title': 'New Delivery Available! 🛵',
-            'message': 'একটি নতুন পার্সেল ডেলিভারির জন্য প্রস্তুত। দ্রুত অ্যাপে ঢুকে এক্সেপ্ট করুন।',
-            
-            // 👉 'target_role' এর বদলে 'topic' ব্যবহার করুন
+            'message': 'একটি নতুন পার্সেল ডেলিভারির জন্য প্রস্তুত। দ্রুত এক্সেপ্ট করুন।',
             'topic': 'riders', 
-            
+            'type': 'rider_job', // 🔴 এটি খুবই জরুরি রিংটোনের জন্য
+            'data': {'screen': 'rider_dashboard'},
+            'sent_at': FieldValue.serverTimestamp(),
+          });
+          
+          // অ্যাডমিনকে নোটিফিকেশন
+          await FirebaseFirestore.instance.collection('notifications').add({
+            'title': 'Order Packed 📦',
+            'message': 'অর্ডার #${orderId.substring(0, 8).toUpperCase()} সেলার প্যাক করেছেন।',
+            'topic': 'admins',
             'sent_at': FieldValue.serverTimestamp(),
           });
           
@@ -2037,12 +2083,15 @@ class _SellerProfileState extends State<SellerProfile> {
                     
                     TextButton.icon(
                       icon: const Icon(Icons.logout, color: Colors.red),
-                      onPressed: () async {
-                        SharedPreferences prefs = await SharedPreferences.getInstance();
-                        await prefs.clear();
-                        await FirebaseAuth.instance.signOut(); 
-                        if(context.mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
-                      }, 
+                      onPressed: () {
+                        Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginPage()), (route) => false);
+                        Future.microtask(() async {
+                          await NotificationService.syncFcmTopics('guest');
+                          SharedPreferences prefs = await SharedPreferences.getInstance();
+                          await prefs.clear();
+                          await FirebaseAuth.instance.signOut();
+                        });
+                      },
                       label: const Text('Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 18))
                     )
                   ]

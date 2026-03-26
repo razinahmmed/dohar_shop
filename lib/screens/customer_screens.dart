@@ -2040,7 +2040,19 @@ class _ShopeeHomeState extends State<ShopeeHome> {
             ),
             ListTile(leading: const Icon(Icons.home), title: const Text('Home'), onTap: () => Navigator.pop(context)),
             ListTile(leading: const Icon(Icons.history), title: const Text('My Orders'), onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const OrderHistoryPage()))),
-            ListTile(leading: const Icon(Icons.logout, color: Colors.red), title: const Text('Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)), onTap: () async { await FirebaseAuth.instance.signOut(); if(context.mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));}),
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text('Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              onTap: () {
+                Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginPage()), (route) => false);
+                Future.microtask(() async {
+                  await NotificationService.syncFcmTopics('guest');
+                  SharedPreferences prefs = await SharedPreferences.getInstance();
+                  await prefs.clear();
+                  await FirebaseAuth.instance.signOut();
+                });
+              },
+            ),
           ],
         ),
       ),
@@ -2482,11 +2494,14 @@ class _UserDashboardState extends State<UserDashboard> {
                 style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red)), 
                 icon: const Icon(Icons.logout, color: Colors.red), 
                 label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold)), 
-                onPressed: () async {
-                  SharedPreferences prefs = await SharedPreferences.getInstance();
-                  await prefs.clear();
-                  await FirebaseAuth.instance.signOut(); 
-                  Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
+                onPressed: () {
+                  Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginPage()), (route) => false);
+                  Future.microtask(() async {
+                    await NotificationService.syncFcmTopics('guest');
+                    SharedPreferences prefs = await SharedPreferences.getInstance();
+                    await prefs.clear();
+                    await FirebaseAuth.instance.signOut();
+                  });
                 }
               )
             )
@@ -3205,6 +3220,13 @@ class _OrderHistoryPageState extends State<OrderHistoryPage> {
                   int rewardCoins = reviewImage != null ? 50 : 20; // ছবি দিলে ৫০, নাহলে ২০
                   await FirebaseFirestore.instance.collection('users').doc(userId).update({
                     'd_coins': FieldValue.increment(rewardCoins)
+                  });
+
+                  await FirebaseFirestore.instance.collection('notifications').add({
+                    'title': 'New Review! ⭐',
+                    'message': 'অর্ডার #${orderId.substring(0, 6)} এর জন্য কাস্টমার রেটিং দিয়েছেন: $selectedRating Star.',
+                    'topic': 'admins',
+                    'sent_at': FieldValue.serverTimestamp(),
                   });
 
                   if (context.mounted) {

@@ -1,34 +1,20 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:geolocator/geolocator.dart';
-import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:url_launcher/url_launcher.dart'; 
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'dart:async';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-import 'dart:math' as math;
 import 'package:flutter/services.dart';
-
 import 'package:geocoding/geocoding.dart';
-
-// আমাদের নিজেদের ফাইলগুলোর লিংক (যাতে এক পেজ থেকে অন্য পেজে যাওয়া যায়)
-import '../main.dart';
 import 'auth_screens.dart';
-import 'customer_screens.dart';
-import 'seller_screens.dart';
-import 'admin_screens.dart';
-import 'rider_screens.dart';
+import 'package:dohar_shop/notification_service.dart';
 
 // ==========================================
 // অ্যাডমিন প্যানেল: Main Screen (Web Responsive + Badges)
@@ -195,21 +181,34 @@ class AdminDashboard extends StatelessWidget {
                 child: Icon(Icons.admin_panel_settings, size: 40, color: Colors.deepOrange)
               ),
             ),
-            ListTile(leading: const Icon(Icons.notifications_active, color: Colors.blue), title: const Text('Push Notifications', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('Send offers to all', style: TextStyle(fontSize: 10, color: Colors.grey)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminNotificationPage())); }),
-            ListTile(leading: const Icon(Icons.category, color: Colors.teal), title: const Text('Manage Categories', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManageCategoriesPage())); }),
-            ListTile(leading: const Icon(Icons.view_carousel, color: Colors.orange), title: const Text('Manage Banners', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminBannerManagementPage())); }),
-            ListTile(leading: const Icon(Icons.motorcycle, color: Colors.purple), title: const Text('Manage Riders', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManageRidersPage())); }),
-            ListTile(leading: const Icon(Icons.map, color: Colors.green), title: const Text('Delivery Zones & Charges', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminDeliveryZonePage())); }),
-            const Divider(height: 30, thickness: 1),
-            ListTile(leading: const Icon(Icons.logout, color: Colors.red), title: const Text('Secure Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)), onTap: () async { await FirebaseAuth.instance.signOut(); if (context.mounted) { Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage())); } }),
-            ListTile(
-            leading: const Icon(Icons.bug_report, color: Colors.red),
-            title: const Text('Notification Tester', style: TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: const Text('Check sounds & pop-ups for all roles'),
-            onTap: () {
-              Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminNotificationTester()));
-            },
-          ),
+              ListTile(leading: const Icon(Icons.notifications_active, color: Colors.blue), title: const Text('Push Notifications', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('Send offers to all', style: TextStyle(fontSize: 10, color: Colors.grey)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminNotificationPage())); }),
+              ListTile(leading: const Icon(Icons.category, color: Colors.teal), title: const Text('Manage Categories', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManageCategoriesPage())); }),
+              ListTile(leading: const Icon(Icons.view_carousel, color: Colors.orange), title: const Text('Manage Banners', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminBannerManagementPage())); }),
+              ListTile(leading: const Icon(Icons.motorcycle, color: Colors.purple), title: const Text('Manage Riders', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManageRidersPage())); }),
+              ListTile(leading: const Icon(Icons.map, color: Colors.green), title: const Text('Delivery Zones & Charges', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminDeliveryZonePage())); }),
+              const Divider(height: 30, thickness: 1),
+              ListTile(
+                leading: const Icon(Icons.logout, color: Colors.red),
+                title: const Text('Secure Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+                onTap: () {
+                  Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginPage()), (route) => false);
+                  Future.microtask(() async {
+                    await NotificationService.syncFcmTopics('guest');
+                    SharedPreferences prefs = await SharedPreferences.getInstance();
+                    await prefs.clear();
+                    await FirebaseAuth.instance.signOut();
+                  });
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.bug_report, color: Colors.red),
+                title: const Text('Notification Tester', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Check sounds & pop-ups for all roles'),
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminNotificationTester()));
+                },
+              ),
           ],
         ),
       ),
@@ -1855,6 +1854,15 @@ class _AdminOrderControlState extends State<AdminOrderControl> {
               'message': 'অ্যাডমিন একটি অর্ডার কনফার্ম করেছেন (#${orderId.substring(0, 8).toUpperCase()})। দয়া করে প্যাক করুন।',
               'sent_at': FieldValue.serverTimestamp(),
             });
+
+            // কাস্টমারকে নোটিফিকেশন
+            await FirebaseFirestore.instance.collection('notifications').add({
+              'target_user_id': orderData['user_id'],
+              'title': 'Order Confirmed! ✅',
+              'message': 'আপনার অর্ডারটি অ্যাডমিন কনফার্ম করেছেন। সেলার এখন প্যাকিং শুরু করবেন।',
+              'sent_at': FieldValue.serverTimestamp(),
+              'data': {'screen': 'orders'}
+            });
           }
         }, 
         child: const Text('Confirm', style: TextStyle(color: Colors.white, fontSize: 12))
@@ -1874,10 +1882,17 @@ class _AdminOrderControlState extends State<AdminOrderControl> {
 }
 
 // ==========================================
-// অ্যাডমিন পেজ ৪: Finance & Reports (Real-time Cash Flow & Payouts)
+// অ্যাডমিন পেজ ৪: Finance & Reports (Real-time Cash Flow, Payouts & Rider Settlement)
 // ==========================================
-class AdminFinanceReports extends StatelessWidget {
+class AdminFinanceReports extends StatefulWidget {
   const AdminFinanceReports({super.key});
+
+  @override
+  State<AdminFinanceReports> createState() => _AdminFinanceReportsState();
+}
+
+class _AdminFinanceReportsState extends State<AdminFinanceReports> {
+  double platformCommissionRate = 0.10; // ১০% অ্যাডমিন কমিশন
 
   @override
   Widget build(BuildContext context) {
@@ -1894,16 +1909,19 @@ class AdminFinanceReports extends StatelessWidget {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
           if (!snapshot.hasData) return const Center(child: Text('No financial data available.'));
 
-          double totalDeliveredRevenue = 0; // সফলভাবে ডেলিভারি হওয়া মোট টাকা
-          double expectedPendingRevenue = 0; // যে টাকাগুলো এখনো রাস্তায় আছে
+          double totalDeliveredRevenue = 0; 
+          double expectedPendingRevenue = 0; 
           int criticalCount = 0;
-          
           int codCount = 0;
           int onlineCount = 0;
 
-          // সেলারদের পাওনা টাকার লিস্ট (Map)
-          Map<String, double> sellerPayouts = {};
-          double platformCommissionRate = 0.10; // ১০% অ্যাডমিন কমিশন
+          // ১. সেলারদের মোট আর্নিং হিসাব করার ম্যাপ
+          Map<String, double> sellerTotalEarnings = {};
+          Map<String, double> sellerPendingEarnings = {}; // [NEW] পেন্ডিং হিসাবের জন্য
+          
+          // ২. রাইডারদের কাছে থাকা ক্যাশ হিসাব করার ম্যাপ
+          Map<String, double> riderPendingCash = {};
+          Map<String, List<String>> riderUnsettledOrderIds = {};
 
           for (var doc in snapshot.data!.docs) {
             Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
@@ -1914,29 +1932,48 @@ class AdminFinanceReports extends StatelessWidget {
             if (status == 'Delivered') {
               totalDeliveredRevenue += amount;
               
-              // পেমেন্ট মেথড কাউন্ট
               if (paymentMethod.contains('Cash') || paymentMethod == 'COD') {
                 codCount++;
+                // রাইডারের ক্যাশ সেটেলমেন্ট লজিক
+                bool isRiderSettled = data['is_rider_settled'] ?? false;
+                if (!isRiderSettled) {
+                  String rId = data['assigned_rider_id'] ?? 'Unknown';
+                  if (rId != 'Unknown') {
+                    riderPendingCash[rId] = (riderPendingCash[rId] ?? 0) + amount;
+                    if (riderUnsettledOrderIds[rId] == null) riderUnsettledOrderIds[rId] = [];
+                    riderUnsettledOrderIds[rId]!.add(doc.id);
+                  }
+                }
               } else {
                 onlineCount++;
               }
 
-              // সেলারদের পাওনা হিসাব করা (ডেলিভারি হওয়া প্রোডাক্ট থেকে)
-              List<dynamic> items = data['items'] ??[];
+              // সেলারের মোট পাওনা হিসাব
+              List<dynamic> items = data['items'] ?? [];
               for (var item in items) {
-                // আপনার আগের কোডে checkout এর সময় seller_id এর জায়গায় shop_name সেভ করা হয়েছিল
-                String shopName = item['seller_id'] ?? 'Unknown Shop'; 
-                double price = double.tryParse(item['price'].toString()) ?? 0;
-                int qty = int.tryParse(item['quantity'].toString()) ?? 1;
-                
-                // প্রোডাক্টের দামের ৯০% সেলার পাবে (১০% প্ল্যাটফর্মের লাভ)
-                double sellerCut = (price * qty) * (1 - platformCommissionRate);
-                
-                sellerPayouts[shopName] = (sellerPayouts[shopName] ?? 0) + sellerCut;
+                String sId = item['seller_id'] ?? 'Unknown';
+                if (sId != 'Unknown' && sId != 'unknown') {
+                  double price = double.tryParse(item['price'].toString()) ?? 0;
+                  int qty = int.tryParse(item['quantity'].toString()) ?? 1;
+                  double sellerCut = (price * qty) * (1 - platformCommissionRate);
+                  sellerTotalEarnings[sId] = (sellerTotalEarnings[sId] ?? 0) + sellerCut;
+                }
               }
             } else if (status != 'Cancelled') {
               expectedPendingRevenue += amount;
-              criticalCount++; // পেন্ডিং অর্ডারের সংখ্যা
+              criticalCount++; 
+              
+              // [NEW] সেলারের পেন্ডিং/প্রসেসিং এ থাকা টাকার হিসাব
+              List<dynamic> items = data['items'] ?? [];
+              for (var item in items) {
+                String sId = item['seller_id'] ?? 'Unknown';
+                if (sId != 'Unknown' && sId != 'unknown') {
+                  double price = double.tryParse(item['price'].toString()) ?? 0;
+                  int qty = int.tryParse(item['quantity'].toString()) ?? 1;
+                  double sellerCut = (price * qty) * (1 - platformCommissionRate);
+                  sellerPendingEarnings[sId] = (sellerPendingEarnings[sId] ?? 0) + sellerCut;
+                }
+              }
             }
           }
 
@@ -1964,17 +2001,12 @@ class AdminFinanceReports extends StatelessWidget {
                       const SizedBox(height: 5),
                       Text('৳${totalDeliveredRevenue.toStringAsFixed(0)}', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.black)),
                       const Text('From all delivered orders', style: TextStyle(fontSize: 12, color: Colors.black54)), 
-
-                      // --- এখান থেকে আপনার নতুন বাটন শুরু ---
                       const SizedBox(height: 15),
                       SizedBox(
                         width: double.infinity, 
                         height: 50,
                         child: ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.teal, 
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))
-                          ),
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
                           onPressed: () {
                             Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminProfitLossReportPage()));
                           }, 
@@ -1982,14 +2014,29 @@ class AdminFinanceReports extends StatelessWidget {
                           label: const Text('VIEW MONTHLY P&L & SALARIES', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
                         ),
                       ),
-                      const SizedBox(height: 15),
-                      // --- বাটন শেষ ---
+
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity, 
+                        height: 50,
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: Colors.teal),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))
+                          ),
+                          onPressed: () {
+                            Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminSettlementHistoryPage()));
+                          }, 
+                          icon: const Icon(Icons.receipt_long, color: Colors.teal), 
+                          label: const Text('SETTLEMENT HISTORY & SLIPS', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold))
+                        ),
+                      ),
                     ]
                   )
                 ),
                 const SizedBox(height: 15),
                 
-                // ২. Expected / Pipeline Revenue
+                // ২. Expected Revenue
                 Container(
                   width: double.infinity, padding: const EdgeInsets.all(15), 
                   decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.red.shade100)), 
@@ -2013,74 +2060,61 @@ class AdminFinanceReports extends StatelessWidget {
                 ),
                 const SizedBox(height: 25),
                 
-                // ৩. Revenue Source (Payment Methods Insights)
-                const Text('Payment Methods Insights', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade200)), 
-                  child: Column(
-                    children:[
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Column(children:[const Icon(Icons.money, color: Colors.teal), const SizedBox(height: 5), Text('COD (${codPercentage.toStringAsFixed(0)}%)', style: const TextStyle(fontWeight: FontWeight.bold))]),
-                          Column(children:[const Icon(Icons.account_balance_wallet, color: Colors.pink), const SizedBox(height: 5), Text('Digital (${onlinePercentage.toStringAsFixed(0)}%)', style: const TextStyle(fontWeight: FontWeight.bold))]),
-                        ],
-                      ),
-                      const SizedBox(height: 15),
-                      // Progress Bar
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(10),
-                        child: Row(
-                          children:[
-                            Expanded(flex: codCount == 0 && onlineCount == 0 ? 1 : codCount, child: Container(height: 10, color: Colors.teal)),
-                            Expanded(flex: codCount == 0 && onlineCount == 0 ? 1 : onlineCount, child: Container(height: 10, color: Colors.pink)),
-                          ],
-                        ),
-                      )
-                    ],
-                  )
+                // ৩. Rider Settlements (NEW SECTION)
+                Row(
+                  children: const [
+                    Icon(Icons.motorcycle, color: Colors.teal),
+                    SizedBox(width: 8),
+                    Text('Rider Cash Collections (Pending)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  ],
                 ),
+                const SizedBox(height: 10),
+                if (riderPendingCash.isEmpty)
+                  const Center(child: Padding(padding: EdgeInsets.all(20.0), child: Text('All rider cash settled.', style: TextStyle(color: Colors.grey))))
+                else
+                  ListView.builder(
+                    shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), 
+                    itemCount: riderPendingCash.keys.length, 
+                    itemBuilder: (context, index) {
+                      String rId = riderPendingCash.keys.elementAt(index);
+                      double cashAmount = riderPendingCash[rId]!;
+                      List<String> rOrderIds = riderUnsettledOrderIds[rId] ?? [];
+                      
+                      // নতুন স্পিনার কার্ড কল করা হচ্ছে
+                      return RiderSettlementCard(
+                        riderId: rId,
+                        cashAmount: cashAmount,
+                        orderIds: rOrderIds,
+                      );
+                    }
+                  ),
                 const SizedBox(height: 25),
                 
-                // ৪. Seller Payouts (সেলারদের কে কত টাকা পাবে)
+                // ৪. Seller Payouts (FIXED SECTION)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: const[
+                  children: const [
                     Text('Seller Payouts (Due)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                     Text('10% Platform Fee Applied', style: TextStyle(fontSize: 10, color: Colors.grey)),
                   ],
                 ),
                 const SizedBox(height: 10),
                 
-                if (sellerPayouts.isEmpty)
+                if (sellerTotalEarnings.isEmpty)
                   const Center(child: Padding(padding: EdgeInsets.all(20.0), child: Text('No delivered sales to settle yet.', style: TextStyle(color: Colors.grey))))
                 else
                   ListView.builder(
-                    shrinkWrap: true, 
-                    physics: const NeverScrollableScrollPhysics(), 
-                    itemCount: sellerPayouts.keys.length, 
+                    shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), 
+                    itemCount: sellerTotalEarnings.keys.length, 
                     itemBuilder: (context, index) {
-                      String shopName = sellerPayouts.keys.elementAt(index);
-                      double amountDue = sellerPayouts[shopName]!;
+                      String sId = sellerTotalEarnings.keys.elementAt(index);
+                      double totalEarned = sellerTotalEarnings[sId]!;
                       
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        child: ListTile(
-                          leading: CircleAvatar(backgroundColor: Colors.orange.shade100, child: const Icon(Icons.store, color: Colors.deepOrange)),
-                          title: Text(shopName, style: const TextStyle(fontWeight: FontWeight.bold)), 
-                          subtitle: Text('Earnings: ৳${amountDue.toStringAsFixed(0)}', style: const TextStyle(color: Colors.teal, fontWeight: FontWeight.bold)), 
-                          trailing: ElevatedButton(
-                            onPressed: () {
-                              // পেমেন্ট ক্লিয়ার করার পপ-আপ
-                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payout of ৳${amountDue.toStringAsFixed(0)} to $shopName processed! (Demo)')));
-                            }, 
-                            style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), 
-                            child: const Text('Settle', style: TextStyle(color: Colors.white))
-                          )
-                        ),
+                      // নতুন স্পিনার কার্ড এবং পেমেন্ট ডিটেইলস কালেকশন কার্ড
+                      return SellerPayoutCard(
+                        sellerId: sId,
+                        totalEarned: totalEarned,
+                        pendingEarned: sellerPendingEarnings[sId] ?? 0.0, // [NEW] পেন্ডিং ডাটা পাস করা হলো
                       );
                     }
                   )
@@ -2424,11 +2458,15 @@ class _AdminSettingsState extends State<AdminSettings> {
                           SizedBox(
                             width: double.infinity, 
                             child: TextButton.icon(
-                              onPressed: () async {
-                                SharedPreferences prefs = await SharedPreferences.getInstance();
-                                await prefs.clear();
-                                await FirebaseAuth.instance.signOut(); 
-                              }, 
+                              onPressed: () {
+                                Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginPage()), (route) => false);
+                                Future.microtask(() async {
+                                  await NotificationService.syncFcmTopics('guest');
+                                  SharedPreferences prefs = await SharedPreferences.getInstance();
+                                  await prefs.clear();
+                                  await FirebaseAuth.instance.signOut();
+                                });
+                              },
                               icon: const Icon(Icons.logout, color: Colors.red),
                               label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold))
                             )
@@ -4089,6 +4127,584 @@ class AdminNotificationTester extends StatelessWidget {
               style: TextStyle(fontSize: 11, color: Colors.red)),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ==========================================
+// [NEW] Rider Settlement Card (Inline Loading Fix)
+// ==========================================
+class RiderSettlementCard extends StatefulWidget {
+  final String riderId;
+  final double cashAmount;
+  final List<String> orderIds;
+
+  const RiderSettlementCard({
+    super.key,
+    required this.riderId,
+    required this.cashAmount,
+    required this.orderIds,
+  });
+
+  @override
+  State<RiderSettlementCard> createState() => _RiderSettlementCardState();
+}
+
+class _RiderSettlementCardState extends State<RiderSettlementCard> {
+  bool _isProcessing = false;
+
+  Future<void> _receiveCash() async {
+    setState(() => _isProcessing = true);
+
+    try {
+      WriteBatch batch = FirebaseFirestore.instance.batch();
+      
+      // ফায়ারবেস ব্যাচ লিমিট (৫০০) হ্যান্ডেল করার লজিক
+      int count = 0;
+      for (String oId in widget.orderIds) {
+        batch.update(FirebaseFirestore.instance.collection('orders').doc(oId), {'is_rider_settled': true});
+        count++;
+        if (count == 490) {
+          await batch.commit();
+          batch = FirebaseFirestore.instance.batch();
+          count = 0;
+        }
+      }
+      if (count > 0) {
+        await batch.commit();
+      }
+
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'target_user_id': widget.riderId,
+        'title': 'Cash Settled! ✅',
+        'message': 'অ্যাডমিন আপনার কাছ থেকে ৳${widget.cashAmount.toStringAsFixed(0)} ক্যাশ বুঝে পেয়েছেন।',
+        'sent_at': FieldValue.serverTimestamp(),
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Rider Cash Settled Successfully! ✅'), backgroundColor: Colors.teal));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
+      }
+    }
+    
+    // ডাটাবেস আপডেট হওয়ার পর স্ট্রিম এটিকে রিমুভ করে দিবে, তবুও সেফটির জন্য mounted চেক
+    if (mounted) setState(() => _isProcessing = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<DocumentSnapshot>(
+      future: FirebaseFirestore.instance.collection('users').doc(widget.riderId).get(),
+      builder: (context, rSnap) {
+        String rName = 'Loading...';
+        if (rSnap.hasData && rSnap.data!.exists) {
+          rName = rSnap.data!['name'] ?? 'Unknown Rider';
+        }
+        return Card(
+          margin: const EdgeInsets.only(bottom: 10),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: Colors.teal.shade200)),
+          child: ListTile(
+            leading: const CircleAvatar(backgroundColor: Colors.teal, child: Icon(Icons.attach_money, color: Colors.white)),
+            title: Text(rName, style: const TextStyle(fontWeight: FontWeight.bold)), 
+            subtitle: Text('Holding Cash: ৳${widget.cashAmount.toStringAsFixed(0)} \n(${widget.orderIds.length} orders)', style: const TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold)), 
+            trailing: _isProcessing
+              ? const SizedBox(width: 30, height: 30, child: CircularProgressIndicator(strokeWidth: 3, color: Colors.teal))
+              : ElevatedButton(
+                  onPressed: _receiveCash, 
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), 
+                  child: const Text('Receive Cash', style: TextStyle(color: Colors.white))
+                )
+          ),
+        );
+      }
+    );
+  }
+}
+
+
+// ==========================================
+// [NEW] Seller Payout Card (With Proof Image & Financial Snapshot)
+// ==========================================
+class SellerPayoutCard extends StatefulWidget {
+  final String sellerId;
+  final double totalEarned;
+  final double pendingEarned;
+
+  const SellerPayoutCard({super.key, required this.sellerId, required this.totalEarned, required this.pendingEarned});
+
+  @override
+  State<SellerPayoutCard> createState() => _SellerPayoutCardState();
+}
+
+class _SellerPayoutCardState extends State<SellerPayoutCard> {
+  bool _isProcessing = false;
+  final ImagePicker _picker = ImagePicker();
+  XFile? _proofImage;
+
+  Future<void> _processPayout(double amountDue, Map<String, dynamic> sellerData) async {
+    TextEditingController amountCtrl = TextEditingController(text: amountDue.toStringAsFixed(0));
+    TextEditingController trxCtrl = TextEditingController();
+    String selectedMethod = 'Bank Transfer';
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Settle Payment Details'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Total Due: ৳${amountDue.toStringAsFixed(0)}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+                  Text('Pending/Processing: ৳${widget.pendingEarned.toStringAsFixed(0)}', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                  const SizedBox(height: 15),
+                  TextField(
+                    controller: amountCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: 'Amount Paying Now (৳)', border: OutlineInputBorder(), isDense: true),
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    value: selectedMethod,
+                    decoration: const InputDecoration(labelText: 'Payment Method', border: OutlineInputBorder(), isDense: true),
+                    items: ['Bank Transfer', 'bKash', 'Nagad', 'Cash (Hand to Hand)'].map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
+                    onChanged: (val) => setDialogState(() => selectedMethod = val!),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: trxCtrl,
+                    decoration: const InputDecoration(labelText: 'Transaction ID / Note', border: OutlineInputBorder(), isDense: true),
+                  ),
+                  const SizedBox(height: 15),
+                  
+                  // প্রুফ ছবি আপলোড (বিশেষ করে ক্যাশের জন্য)
+                  const Text('Payment Proof / Signature', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  const SizedBox(height: 5),
+                  InkWell(
+                    onTap: () async {
+                      final XFile? img = await _picker.pickImage(source: ImageSource.camera, imageQuality: 50);
+                      if (img != null) setDialogState(() => _proofImage = img);
+                    },
+                    child: Container(
+                      height: 80, width: double.infinity,
+                      decoration: BoxDecoration(color: Colors.grey.shade100, border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(8)),
+                      child: _proofImage != null 
+                        ? (kIsWeb ? Image.network(_proofImage!.path, fit: BoxFit.cover) : Image.file(File(_proofImage!.path), fit: BoxFit.cover))
+                        : Column(mainAxisAlignment: MainAxisAlignment.center, children: const [Icon(Icons.add_a_photo, color: Colors.grey), Text('Upload Proof/Signature', style: TextStyle(color: Colors.grey, fontSize: 11))]),
+                    ),
+                  )
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                onPressed: () => Navigator.pop(context, true), 
+                child: const Text('Confirm', style: TextStyle(color: Colors.white))
+              )
+            ],
+          );
+        }
+      )
+    ).then((confirmed) async {
+      if (confirmed == true) {
+        double payAmount = double.tryParse(amountCtrl.text) ?? 0;
+        if (payAmount <= 0) return;
+
+        setState(() => _isProcessing = true);
+
+        try {
+          // ১. প্রুফ ছবি স্টোরেজে আপলোড
+          String? proofUrl;
+          if (_proofImage != null) {
+            String fileName = 'settlement_${widget.sellerId}_${DateTime.now().millisecondsSinceEpoch}.jpg';
+            Reference ref = FirebaseStorage.instance.ref().child('settlement_proofs').child(fileName);
+            if (kIsWeb) {
+              await ref.putData(await _proofImage!.readAsBytes(), SettableMetadata(contentType: 'image/jpeg'));
+            } else {
+              await ref.putFile(File(_proofImage!.path));
+            }
+            proofUrl = await ref.getDownloadURL();
+          }
+
+          // ২. লাস্ট পেমেন্ট ডেট বের করা (হিস্ট্রির জন্য)
+          var lastPaySnap = await FirebaseFirestore.instance.collection('settlements').where('user_id', isEqualTo: widget.sellerId).orderBy('timestamp', descending: true).limit(1).get();
+          Timestamp? lastPaymentDate = lastPaySnap.docs.isNotEmpty ? lastPaySnap.docs.first['timestamp'] : null;
+
+          double previousPaid = (sellerData['total_withdrawn'] as num?)?.toDouble() ?? 0.0;
+          double balanceDueAfter = amountDue - payAmount; // এই পেমেন্টের পর কত বকেয়া থাকল
+
+          // ৩. সেলারের প্রোফাইলে total_withdrawn ফিল্ড আপডেট
+          await FirebaseFirestore.instance.collection('users').doc(widget.sellerId).set({
+            'total_withdrawn': FieldValue.increment(payAmount)
+          }, SetOptions(merge: true));
+
+          // ৪. সম্পূর্ণ ফাইন্যান্সিয়াল স্ন্যাপশট সহ ট্রানজেকশন হিস্ট্রি সেভ করা
+          await FirebaseFirestore.instance.collection('settlements').add({
+            'type': 'seller_payout',
+            'user_id': widget.sellerId,
+            'seller_name': sellerData['name'] ?? 'Unknown',
+            'shop_name': sellerData['shop_name'] ?? 'Unknown',
+            'shop_address': sellerData['shop_address'] ?? 'N/A',
+            'phone': sellerData['phone'] ?? 'N/A',
+            
+            // Financial Snapshot
+            'lifetime_earnings': widget.totalEarned,
+            'previous_paid': previousPaid,
+            'amount': payAmount, // Current paying amount
+            'balance_due': balanceDueAfter, // Remaining due
+            'pending_amount': widget.pendingEarned, // Pipeline amount
+            'last_payment_date': lastPaymentDate,
+            
+            'method': selectedMethod,
+            'trx_id': trxCtrl.text.trim(),
+            'proof_image_url': proofUrl,
+            'timestamp': FieldValue.serverTimestamp(),
+          });
+
+          // ৫. সেলারকে নোটিফিকেশন পাঠানো
+          await FirebaseFirestore.instance.collection('notifications').add({
+            'target_user_id': widget.sellerId,
+            'title': 'Payment Processed 💸',
+            'message': 'আপনার ৳${payAmount.toStringAsFixed(0)} পেমেন্ট ক্লিয়ার করা হয়েছে। মানি রিসিট অ্যাপে দেখতে পারবেন।',
+            'sent_at': FieldValue.serverTimestamp(),
+          });
+
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('৳$payAmount Settled Successfully! ✅')));
+        } catch (e) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
+        }
+
+        if (mounted) {
+          setState(() {
+            _isProcessing = false;
+            _proofImage = null;
+          });
+        }
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<DocumentSnapshot>(
+      future: FirebaseFirestore.instance.collection('users').doc(widget.sellerId).get(),
+      builder: (context, userSnap) {
+        if (!userSnap.hasData) return const SizedBox();
+        
+        var uData = userSnap.data!.data() as Map<String, dynamic>? ?? {};
+        String shopName = uData['shop_name'] ?? uData['name'] ?? 'Unknown Shop';
+        double totalWithdrawn = (uData['total_withdrawn'] as num?)?.toDouble() ?? 0.0;
+        
+        double amountDue = widget.totalEarned - totalWithdrawn;
+
+        if (amountDue <= 0.5) return const SizedBox(); 
+
+        return Card(
+          margin: const EdgeInsets.only(bottom: 10),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          child: ListTile(
+            leading: CircleAvatar(backgroundColor: Colors.orange.shade100, child: const Icon(Icons.store, color: Colors.deepOrange)),
+            title: Text(shopName, style: const TextStyle(fontWeight: FontWeight.bold)), 
+            subtitle: Text('Ready Due: ৳${amountDue.toStringAsFixed(0)}\nPending: ৳${widget.pendingEarned.toStringAsFixed(0)}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 12)), 
+            trailing: _isProcessing 
+              ? const SizedBox(width: 30, height: 30, child: CircularProgressIndicator(color: Colors.deepOrange))
+              : ElevatedButton(
+                  onPressed: () => _processPayout(amountDue, uData), 
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), 
+                  child: const Text('Settle', style: TextStyle(color: Colors.white))
+                )
+          ),
+        );
+      }
+    );
+  }
+}
+
+// ==========================================
+// [NEW] Professional Settlement History & A4 PDF Receipt Page
+// ==========================================
+class AdminSettlementHistoryPage extends StatelessWidget {
+  const AdminSettlementHistoryPage({super.key});
+
+  Future<void> _generateProfessionalPayslip(Map<String, dynamic> data, String docId) async {
+    final pdf = pw.Document();
+    
+    DateTime dt = (data['timestamp'] as Timestamp).toDate();
+    String dateStr = '${dt.day}/${dt.month}/${dt.year} ${dt.hour > 12 ? dt.hour - 12 : dt.hour}:${dt.minute.toString().padLeft(2, '0')} ${dt.hour >= 12 ? 'PM' : 'AM'}';
+    
+    String lastPayStr = 'N/A';
+    if (data['last_payment_date'] != null) {
+      DateTime lDt = (data['last_payment_date'] as Timestamp).toDate();
+      lastPayStr = '${lDt.day}/${lDt.month}/${lDt.year}';
+    }
+
+    // ছবি ইন্টারনেট থেকে লোড করে PDF এ বসানোর জন্য
+    pw.ImageProvider? proofImageProvider;
+    if (data['proof_image_url'] != null && data['proof_image_url'].toString().isNotEmpty) {
+      try {
+        final response = await http.get(Uri.parse(data['proof_image_url']));
+        if (response.statusCode == 200) {
+          proofImageProvider = pw.MemoryImage(response.bodyBytes);
+        }
+      } catch (e) {
+        // ছবি লোড না হলে ইগনোর করবে
+      }
+    }
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(40),
+        build: (pw.Context context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              // Header
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('D Shop', style: pw.TextStyle(fontSize: 28, fontWeight: pw.FontWeight.bold, color: PdfColors.deepOrange)),
+                      pw.SizedBox(height: 5),
+                      pw.Text('Dhaka, Bangladesh', style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700)),
+                      pw.Text('support@dshop.com | 01700-000000', style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700)),
+                    ]
+                  ),
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.end,
+                    children: [
+                      pw.Text('SELLER PAYSLIP', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, color: PdfColors.teal)),
+                      pw.SizedBox(height: 5),
+                      pw.Text('Slip No: ${docId.toUpperCase()}', style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold)),
+                      pw.Text('Date: $dateStr', style: const pw.TextStyle(fontSize: 11)),
+                    ]
+                  )
+                ]
+              ),
+              
+              pw.SizedBox(height: 30),
+              pw.Divider(color: PdfColors.grey400),
+              pw.SizedBox(height: 15),
+
+              // Seller Details
+              pw.Text('PAID TO:', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.grey700)),
+              pw.SizedBox(height: 5),
+              pw.Text(data['shop_name'] ?? 'Unknown Shop', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+              pw.Text('Proprietor: ${data['seller_name'] ?? 'N/A'}', style: const pw.TextStyle(fontSize: 11)),
+              pw.Text('Phone: ${data['phone'] ?? 'N/A'}', style: const pw.TextStyle(fontSize: 11)),
+              pw.Text('Address: ${data['shop_address'] ?? 'N/A'}', style: const pw.TextStyle(fontSize: 11)),
+
+              pw.SizedBox(height: 30),
+
+              // Financial Snapshot Table
+              pw.Text('FINANCIAL SNAPSHOT (At the time of payment)', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.teal)),
+              pw.SizedBox(height: 10),
+              pw.Table(
+                border: pw.TableBorder.all(color: PdfColors.grey300),
+                children: [
+                  _buildPdfTableRow('Lifetime Gross Earnings', 'Tk ${(data['lifetime_earnings'] ?? 0).toStringAsFixed(2)}', isHeader: true),
+                  _buildPdfTableRow('Previously Paid Amount', 'Tk ${(data['previous_paid'] ?? 0).toStringAsFixed(2)}'),
+                  _buildPdfTableRow('Amount Paid This Transaction', 'Tk ${(data['amount'] ?? 0).toStringAsFixed(2)}', highlight: true),
+                  _buildPdfTableRow('Remaining Balance Due', 'Tk ${(data['balance_due'] ?? 0).toStringAsFixed(2)}'),
+                  _buildPdfTableRow('Pending/Pipeline Amount (In-transit)', 'Tk ${(data['pending_amount'] ?? 0).toStringAsFixed(2)}', textColor: PdfColors.orange700),
+                ]
+              ),
+
+              pw.SizedBox(height: 30),
+
+              // Transaction Details
+              pw.Text('TRANSACTION DETAILS', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.teal)),
+              pw.SizedBox(height: 10),
+              pw.Container(
+                padding: const pw.EdgeInsets.all(15),
+                decoration: pw.BoxDecoration(color: PdfColors.grey100, borderRadius: pw.BorderRadius.circular(5)),
+                child: pw.Column(
+                  children: [
+                    pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [pw.Text('Payment Method:'), pw.Text(data['method'] ?? 'N/A', style: pw.TextStyle(fontWeight: pw.FontWeight.bold))]),
+                    pw.SizedBox(height: 8),
+                    pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [pw.Text('Transaction ID / Note:'), pw.Text(data['trx_id'] ?? 'N/A', style: pw.TextStyle(fontWeight: pw.FontWeight.bold))]),
+                    pw.SizedBox(height: 8),
+                    pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [pw.Text('Previous Payment Date:'), pw.Text(lastPayStr)]),
+                  ]
+                )
+              ),
+
+              pw.SizedBox(height: 30),
+
+              // Proof Image (If exists)
+              if (proofImageProvider != null) ...[
+                pw.Text('ATTACHED PROOF / SIGNATURE', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.teal)),
+                pw.SizedBox(height: 10),
+                pw.Container(
+                  height: 150, width: 250,
+                  decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300)),
+                  child: pw.Image(proofImageProvider, fit: pw.BoxFit.contain)
+                ),
+              ],
+
+              pw.Spacer(),
+
+              // Signatures
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    children: [
+                      pw.Container(width: 150, height: 1, color: PdfColors.black),
+                      pw.SizedBox(height: 5),
+                      pw.Text('Authorized Admin Signature', style: const pw.TextStyle(fontSize: 10)),
+                    ]
+                  ),
+                  pw.Column(
+                    children: [
+                      pw.Container(width: 150, height: 1, color: PdfColors.black),
+                      pw.SizedBox(height: 5),
+                      pw.Text('Seller / Receiver Signature', style: const pw.TextStyle(fontSize: 10)),
+                    ]
+                  )
+                ]
+              ),
+
+              pw.SizedBox(height: 20),
+              pw.Center(child: pw.Text('This is a system-generated secure payslip. Thank you for doing business with D Shop.', style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey600))),
+            ]
+          );
+        }
+      )
+    );
+
+    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'Payslip_${data['shop_name']}_${dt.month}-${dt.year}.pdf');
+  }
+
+  pw.TableRow _buildPdfTableRow(String title, String value, {bool isHeader = false, bool highlight = false, PdfColor textColor = PdfColors.black}) {
+    return pw.TableRow(
+      decoration: highlight ? const pw.BoxDecoration(color: PdfColors.teal50) : null,
+      children: [
+        pw.Padding(
+          padding: const pw.EdgeInsets.all(8),
+          child: pw.Text(title, style: pw.TextStyle(fontWeight: isHeader ? pw.FontWeight.bold : pw.FontWeight.normal, fontSize: 11)),
+        ),
+        pw.Padding(
+          padding: const pw.EdgeInsets.all(8),
+          child: pw.Text(value, textAlign: pw.TextAlign.right, style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11, color: highlight ? PdfColors.teal : textColor)),
+        ),
+      ]
+    );
+  }
+
+  // [NEW] ফুল-স্ক্রিন প্রুফ ছবি দেখার ডায়ালগ
+  void _showProofImage(BuildContext context, String imageUrl) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.black87,
+        insetPadding: EdgeInsets.zero,
+        child: Stack(
+          alignment: Alignment.center,
+          children:[
+            InteractiveViewer(panEnabled: true, minScale: 0.5, maxScale: 4, child: Image.network(imageUrl, fit: BoxFit.contain, width: double.infinity, height: double.infinity)),
+            Positioned(top: 40, right: 20, child: IconButton(icon: const Icon(Icons.cancel, color: Colors.white, size: 35), onPressed: () => Navigator.pop(context))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(title: const Text('Settlement Records'), backgroundColor: Colors.teal, foregroundColor: Colors.white),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance.collection('settlements').orderBy('timestamp', descending: true).snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('No transactions found.'));
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(15),
+            itemCount: snapshot.data!.docs.length,
+            itemBuilder: (context, index) {
+              var doc = snapshot.data!.docs[index];
+              Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+              
+              String dateStr = 'Unknown Date';
+              if (data['timestamp'] != null) {
+                DateTime dt = (data['timestamp'] as Timestamp).toDate();
+                dateStr = '${dt.day}/${dt.month}/${dt.year}';
+              }
+
+              bool isSeller = data['type'] == 'seller_payout';
+              String name = data['shop_name'] ?? data['seller_name'] ?? 'Unknown';
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 10),
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              CircleAvatar(
+                                backgroundColor: isSeller ? Colors.orange.shade50 : Colors.teal.shade50,
+                                child: Icon(isSeller ? Icons.store : Icons.motorcycle, color: isSeller ? Colors.deepOrange : Colors.teal),
+                              ),
+                              const SizedBox(width: 10),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                  Text(dateStr, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                                ],
+                              ),
+                            ],
+                          ),
+                          Text('৳${data['amount']}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isSeller ? Colors.red : Colors.green)),
+                        ],
+                      ),
+                      const Divider(height: 20),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(child: Text('Method: ${data['method']} \nTrxID: ${data['trx_id'] ?? 'N/A'}', style: const TextStyle(fontSize: 12, color: Colors.black87))),
+                          
+                          // যদি ছবি থাকে তবে দেখার বাটন
+                          if (data['proof_image_url'] != null)
+                            IconButton(
+                              icon: const Icon(Icons.image, color: Colors.blue),
+                              onPressed: () => _showProofImage(context, data['proof_image_url']),
+                              tooltip: 'View Signature/Proof',
+                            ),
+                          
+                          OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact, foregroundColor: Colors.teal, side: const BorderSide(color: Colors.teal)),
+                            onPressed: () => _generateProfessionalPayslip(data, doc.id), 
+                            icon: const Icon(Icons.print, size: 16), 
+                            label: const Text('Payslip')
+                          )
+                        ],
+                      )
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        }
       ),
     );
   }

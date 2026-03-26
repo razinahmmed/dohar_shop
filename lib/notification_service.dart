@@ -10,6 +10,8 @@ import 'screens/customer_screens.dart';
 import 'screens/admin_screens.dart';
 import 'screens/seller_screens.dart';
 import 'screens/rider_screens.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class NotificationService {
   static final FlutterLocalNotificationsPlugin _flutterLocalNotificationsPlugin =
@@ -166,5 +168,45 @@ class NotificationService {
       const NotificationDetails(android: androidDetails),
       payload: message.data['screen'],
     );
+  }
+
+  // ৭. Role অনুযায়ী টপিক সিঙ্ক করা এবং Token সেভ করা (সবার জন্য)
+  static Future<void> syncFcmTopics(String role) async {
+    FirebaseMessaging messaging = FirebaseMessaging.instance;
+    User? user = FirebaseAuth.instance.currentUser;
+
+    // [NEW] লগিন থাকা অবস্থায় সবার (সেলার, রাইডার, কাস্টমার) FCM Token ডাটাবেসে সেভ করা
+    if (user != null && role != 'guest') {
+      try {
+        String? token = await messaging.getToken();
+        if (token != null) {
+          await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+            'fcm_token': token
+          });
+        }
+      } catch (e) {
+        print("Token Update Error: $e");
+      }
+    }
+    
+    // প্রথমে সব টপিক থেকে আন-সাবস্ক্রাইব করবে (যাতে পুরোনো রোলের মেসেজ না আসে)
+    await messaging.unsubscribeFromTopic('riders');
+    await messaging.unsubscribeFromTopic('sellers');
+    await messaging.unsubscribeFromTopic('admins');
+    await messaging.unsubscribeFromTopic('all_users');
+
+    // এরপর নতুন রোল অনুযায়ী সাবস্ক্রাইব করবে
+    if (role == 'rider') {
+      await messaging.subscribeToTopic('riders');
+    } else if (role == 'seller') {
+      await messaging.subscribeToTopic('sellers');
+    } else if (role == 'admin' || role == 'super_admin') {
+      await messaging.subscribeToTopic('admins');
+    }
+    
+    // Guest (লগআউট) না হলে সবাইকে all_users এ রাখবে
+    if (role != 'guest') {
+      await messaging.subscribeToTopic('all_users');
+    }
   }
 }

@@ -10,6 +10,9 @@ exports.sendNotification = onDocumentCreated("notifications/{id}", async (event)
     const title = data.title || "D Shop";
     const message = data.message || "New Update";
     const screen = data.data && data.data.screen ? data.data.screen : "notifications";
+    
+    // [FIXED] type রিসিভ করা হচ্ছে যাতে ফোনের ব্যাকগ্রাউন্ড বুঝতে পারে
+    const type = data.type || (data.data && data.data.type) || "default";
 
     // ১. টপিক নির্ধারণ লজিক
     let topicName = data.topic || null;
@@ -24,7 +27,7 @@ exports.sendNotification = onDocumentCreated("notifications/{id}", async (event)
     let channelId = "d_shop_channel";
     let soundName = "default";
 
-    if (topicName === "riders" || (data.data && data.data.type === "rider_job")) {
+    if (topicName === "riders" || type === "rider_job") {
         channelId = "rider_job_channel";
         soundName = "rider_alert";
     } else if (topicName === "admins") {
@@ -34,7 +37,8 @@ exports.sendNotification = onDocumentCreated("notifications/{id}", async (event)
 
     const messagePayload = {
         notification: { title: title, body: message },
-        data: { screen: screen, click_action: "FLUTTER_NOTIFICATION_CLICK" },
+        // [FIXED] ফোনের কাছে type পাঠানো হচ্ছে
+        data: { screen: screen, type: type, click_action: "FLUTTER_NOTIFICATION_CLICK" }, 
         android: {
             priority: "high",
             notification: { channelId: channelId, sound: soundName, priority: "high" }
@@ -50,7 +54,7 @@ exports.sendNotification = onDocumentCreated("notifications/{id}", async (event)
             await admin.messaging().send({ topic: topicName, ...messagePayload });
             console.log(`Sent to Topic: ${topicName}`);
         } else if (data.target_user_id) {
-            // পার্সোনাল মেসেজ (যেমন সেলারকে অর্ডার কনফার্মেশন)
+            // পার্সোনাল মেসেজ
             const userDoc = await admin.firestore().collection("users").doc(data.target_user_id).get();
             if (userDoc.exists && userDoc.data().fcm_token) {
                 await admin.messaging().send({ token: userDoc.data().fcm_token, ...messagePayload });
