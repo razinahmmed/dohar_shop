@@ -160,7 +160,7 @@ class SellerDashboard extends StatefulWidget {
 }
 
 class _SellerDashboardState extends State<SellerDashboard> {
-  String _selectedFilter = 'Low Stock'; // ডিফল্ট ফিল্টার
+  String _selectedFilter = 'Top Sales'; // 🔴 ডিফল্ট ফিল্টার পরিবর্তন করা হলো
 
   @override 
   Widget build(BuildContext context) {
@@ -223,11 +223,58 @@ class _SellerDashboardState extends State<SellerDashboard> {
             // Stats & Quick Actions
             const Text('Overall Performance', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 15),
-            Row(children:[
-              _buildStatCard("Today's Sales", "৳০", Colors.teal[50]!, Colors.teal), 
-              const SizedBox(width: 15), 
-              _buildStatCard("Active Orders", "০", Colors.orange[50]!, Colors.orange)
-            ]),
+            
+            // 🔴 রিয়েল ডাটা ক্যালকুলেশন
+            StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance.collection('orders').snapshots(),
+              builder: (context, snapshot) {
+                double todaySales = 0;
+                int activeOrders = 0;
+
+                if (snapshot.hasData) {
+                  DateTime now = DateTime.now();
+                  
+                  for (var doc in snapshot.data!.docs) {
+                    var data = doc.data() as Map<String, dynamic>;
+                    String status = data['status'] ?? 'Pending';
+                    List items = data['items'] ?? [];
+
+                    bool isMyOrder = false;
+                    double myOrderTotal = 0;
+
+                    for (var item in items) {
+                      if (item['seller_id'] == currentUser.uid) {
+                        isMyOrder = true;
+                        myOrderTotal += (double.tryParse(item['price'].toString()) ?? 0) * (int.tryParse(item['quantity'].toString()) ?? 1);
+                      }
+                    }
+
+                    if (isMyOrder) {
+                      // ১. অ্যাক্টিভ অর্ডার কাউন্ট (ডেলিভারড, ক্যান্সেল বা ফেইল বাদে বাকি সবই রানিং অর্ডার)
+                      if (['Pending', 'Processing', 'Ready to Ship', 'Dispatched', 'In-Transit'].contains(status)) {
+                        activeOrders++;
+                      }
+
+                      // ২. আজকের মোট সেলস (ক্যান্সেল বা ফেইল হওয়া বাদে)
+                      if (data['order_date'] != null && status != 'Cancelled' && status != 'Delivery Failed') {
+                        DateTime orderDate = (data['order_date'] as Timestamp).toDate();
+                        if (orderDate.year == now.year && orderDate.month == now.month && orderDate.day == now.day) {
+                          todaySales += myOrderTotal;
+                        }
+                      }
+                    }
+                  }
+                }
+
+                return Row(
+                  children:[
+                    _buildStatCard("Today's Sales", "৳${todaySales.toStringAsFixed(0)}", Colors.teal[50]!, Colors.teal), 
+                    const SizedBox(width: 15), 
+                    _buildStatCard("Active Orders", "$activeOrders", Colors.orange[50]!, Colors.orange)
+                  ]
+                );
+              }
+            ),
             const SizedBox(height: 25),
             
             const Text('QUICK ACTION', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)), 
@@ -326,6 +373,10 @@ class _SellerDashboardState extends State<SellerDashboard> {
                       margin: const EdgeInsets.only(bottom: 10),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       child: ListTile(
+                        // 🔴 ক্লিক করলেই এডিট পেজে নিয়ে যাবে
+                        onTap: () {
+                           Navigator.push(context, MaterialPageRoute(builder: (context) => EditProductPage(productId: doc.id, productData: data)));
+                        },
                         leading: Container(
                           width: 50, height: 50, 
                           decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)), 
@@ -480,7 +531,11 @@ class ProductManagement extends StatelessWidget {
                                 if (value == 'edit') {
                                   Navigator.push(context, MaterialPageRoute(builder: (context) => EditProductPage(productId: doc.id, productData: data)));
                                 } else if (value == 'toggle_visibility') { doc.reference.update({'is_active': !isActive}); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(isActive ? 'Product hidden!' : 'Product visible!'))); }
-                                else if (value == 'delete') { doc.reference.delete(); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product Deleted!'))); }
+                                else if (value == 'delete') { 
+                                  // Soft Delete: ডাটাবেস থেকে মুছবে না, শুধু হাইড করে দিবে
+                                  doc.reference.update({'status': 'deleted', 'is_active': false}); 
+                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product removed from shop!'), backgroundColor: Colors.red)); 
+                                }
                               },
                               itemBuilder: (context) =>[
                                 const PopupMenuItem(value: 'edit', child: Row(children:[Icon(Icons.edit, color: Colors.blue, size: 20), SizedBox(width: 10), Text('Edit Product')])),
@@ -526,49 +581,44 @@ class _EditProductPageState extends State<EditProductPage> {
   late TextEditingController unitController;
   
   String? selectedCategory;
-  List<dynamic> existingImageUrls =[];
-  List<Map<String, dynamic>> variantMatrix =[];
+  List<dynamic> existingImageUrls = [];
+  List<Map<String, dynamic>> variantMatrix = [];
   
-  // ম্যাজিক বাটন: এটি অন থাকলে শুধু স্টক এডিট করা যাবে এবং এপ্রুভাল লাগবে না
-  bool isStockUpdateOnly = false; 
+  // ডিফল্টভাবে শুধু স্টক এডিট অন থাকবে
+  bool isStockUpdateOnly = true; 
+  bool hasRealVariants = false; // ভেরিয়েন্ট আছে কি না চেক করার জন্য
 
   @override
   void initState() {
     super.initState();
     var data = widget.productData;
     
-    // প্রতিটি ফিল্ডের জন্য null চেক এবং ডিফল্ট ভ্যালু সেট করা হয়েছে
     nameController = TextEditingController(text: data['product_name']?.toString() ?? '');
-    
-    // Price এবং Stock ফিল্ডে null থাকলে '0' দেখাবে যাতে ক্রাশ না করে
     priceController = TextEditingController(text: (data['price'] ?? 0).toString());
     originalPriceController = TextEditingController(text: (data['original_price'] ?? data['price'] ?? 0).toString());
     stockController = TextEditingController(text: (data['stock'] ?? 0).toString());
-    
     descController = TextEditingController(text: data['description']?.toString() ?? '');
     unitController = TextEditingController(text: data['variant_unit']?.toString() ?? 'Unit');
     selectedCategory = data['category']?.toString();
     
-    // ইমেজ লিস্ট লোড করার সময় সেফটি চেক
     if (data['image_urls'] != null && data['image_urls'] is List) {
       existingImageUrls = List<dynamic>.from(data['image_urls']);
     }
     
-    // ভেরিয়েন্ট লিস্ট লোড করার সময় সেফটি চেক
     if (data['variants'] != null && data['variants'] is List) {
       try {
         variantMatrix = List<Map<String, dynamic>>.from(
           (data['variants'] as List).map((x) => Map<String, dynamic>.from(x))
         );
       } catch (e) {
-        print("Error parsing variants: $e");
         variantMatrix = [];
       }
     }
 
-    // যদি প্রডাক্টটি অলরেডি পেন্ডিং থাকে, তবে আমরা ডিফল্টভাবে 'isStockUpdateOnly' ফলস রাখবো 
-    // যাতে সেলার সবকিছু এডিট করতে পারে।
-    isStockUpdateOnly = false; 
+    // চেক করা হচ্ছে আসল ভেরিয়েন্ট আছে কিনা
+    if (variantMatrix.length > 1 || (variantMatrix.isNotEmpty && (variantMatrix[0]['color'] != 'Default' || variantMatrix[0]['size'] != 'Default'))) {
+      hasRealVariants = true;
+    }
   }
 
   void _calculateTotalStock() {
@@ -583,33 +633,27 @@ class _EditProductPageState extends State<EditProductPage> {
 
   void _updateProduct() async {
     if (nameController.text.isEmpty || priceController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Name and Price are required!'))
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Name and Price are required!')));
       return;
     }
 
-    try {
-      showDialog(
-        context: context, 
-        barrierDismissible: false, 
-        builder: (context) => const Center(child: CircularProgressIndicator())
-      );
+    // যদি ভেরিয়েন্ট না থাকে, তবে মেইন স্টকের ডাটা ভেরিয়েন্ট ম্যাট্রিক্সেও আপডেট করে দিতে হবে
+    if (!hasRealVariants && variantMatrix.isNotEmpty) {
+      variantMatrix[0]['stock'] = int.tryParse(stockController.text.trim()) ?? 0;
+    }
 
-      // ১. প্রথমে বর্তমান স্ট্যাটাসটি দেখে নিন
-      String currentStatus = widget.productData['status'] ?? 'pending';
+    try {
+      showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
 
       Map<String, dynamic> updateData = {};
 
       if (isStockUpdateOnly) {
-        // ২. যদি শুধু স্টক আপডেট মোড অন থাকে (এতে স্ট্যাটাস পরিবর্তন হবে না)
         updateData = {
           'stock': int.tryParse(stockController.text.trim()) ?? 0,
           'variants': variantMatrix,
           'updated_at': FieldValue.serverTimestamp(),
         };
       } else {
-        // ৩. যদি ফুল এডিট করা হয় (নাম, দাম, বর্ণনা ইত্যাদি)
         updateData = {
           'product_name': nameController.text.trim(),
           'price': int.tryParse(priceController.text.trim()) ?? 0,
@@ -619,44 +663,32 @@ class _EditProductPageState extends State<EditProductPage> {
           'category': selectedCategory,
           'variant_unit': unitController.text.trim(),
           'variants': variantMatrix,
-          'status': 'pending', // যেকোনো ফুল এডিটে স্ট্যাটাস আবার পেন্ডিং হয়ে যাবে
+          'status': 'pending', 
           'updated_at': FieldValue.serverTimestamp(),
         };
       }
 
-      // ৪. ডাটাবেস আপডেট
-      await FirebaseFirestore.instance
-          .collection('products')
-          .doc(widget.productId)
-          .update(updateData);
+      await FirebaseFirestore.instance.collection('products').doc(widget.productId).update(updateData);
 
-      // ৫. অ্যাডমিন নোটিফিকেশন (যদি স্টক বাদে অন্য কিছু এডিট করা হয়)
       if (!isStockUpdateOnly) {
         await FirebaseFirestore.instance.collection('notifications').add({
           'title': 'Product Updated 📦',
-          'message': 'সেলার "${nameController.text.trim()}" এডিট করেছেন। বর্তমান স্ট্যাটাস: পেন্ডিং।',
-          'target_role': 'admin', // এডমিন প্যানেলে দেখার জন্য
+          'message': 'সেলার "${nameController.text.trim()}" এডিট করেছেন। এপ্রুভ করুন।',
+          'topic': 'admins',
           'sent_at': FieldValue.serverTimestamp(),
         });
       }
 
       if (!mounted) return;
-      Navigator.pop(context); // লোডিং বন্ধ
-      Navigator.pop(context); // পেজ থেকে বের হওয়া
+      Navigator.of(context, rootNavigator: true).pop(); // Loader close
+      Navigator.pop(context); // Go back
       
-      String msg = isStockUpdateOnly 
-          ? 'Stock updated instantly! ⚡' 
-          : 'Product updated and sent for approval! ⏳';
-          
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), backgroundColor: isStockUpdateOnly ? Colors.green : Colors.blue)
-      );
+      String msg = isStockUpdateOnly ? 'Stock updated instantly! ⚡' : 'Product updated and sent for approval! ⏳';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: isStockUpdateOnly ? Colors.green : Colors.blue));
 
     } catch (e) {
-      Navigator.pop(context); // ভুল হলে লোডিং বন্ধ
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red)
-      );
+      Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
     }
   }
 
@@ -670,130 +702,213 @@ class _EditProductPageState extends State<EditProductPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
-            // স্মার্ট স্টক আপডেট টগল
-            Container(
-              padding: const EdgeInsets.all(5),
-              decoration: BoxDecoration(color: isStockUpdateOnly ? Colors.green.shade50 : Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: isStockUpdateOnly ? Colors.green : Colors.red.shade200)),
-              child: SwitchListTile(
-                title: Text('Stock Update Only (Instant Live)', style: TextStyle(fontWeight: FontWeight.bold, color: isStockUpdateOnly ? Colors.green : Colors.red)),
-                subtitle: Text(isStockUpdateOnly ? 'Your product will remain live. You can only edit stock quantities.' : 'If you edit names, prices, or descriptions, the product will be PENDING for admin approval.', style: const TextStyle(fontSize: 11)),
-                value: isStockUpdateOnly,
-                activeThumbColor: Colors.green,
-                onChanged: (val) => setState(() => isStockUpdateOnly = val),
-              ),
-            ),
-            const SizedBox(height: 25),
             
-            // ছবি দেখানো (এডিট মোডে আপাতত শুধু দেখানো হচ্ছে)
-            const Text('Product Images', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 70,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: existingImageUrls.length,
-                itemBuilder: (context, index) {
-                  return Container(
-                    width: 70, margin: const EdgeInsets.only(right: 10),
-                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade300), image: DecorationImage(image: NetworkImage(existingImageUrls[index]), fit: BoxFit.cover)),
+            // 🟢 কুইক স্টক আপডেট মোড অন থাকলে শুধু এটি দেখাবে
+            if (isStockUpdateOnly) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.green.shade200)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(children: [Icon(Icons.flash_on, color: Colors.green), SizedBox(width: 5), Text('Quick Stock Update', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16))]),
+                    const SizedBox(height: 5),
+                    const Text('এই মোডে প্রোডাক্টের স্ট্যাটাস পেন্ডিং হবে না, সাথে সাথেই অ্যাপে আপডেট হয়ে যাবে।', style: TextStyle(fontSize: 12, color: Colors.black87)),
+                    const SizedBox(height: 15),
+                    Text('Product: ${nameController.text}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                    const SizedBox(height: 15),
+
+                    if (!hasRealVariants)
+                      TextField(
+                        controller: stockController, 
+                        keyboardType: TextInputType.number, 
+                        decoration: const InputDecoration(labelText: 'Total Stock', border: OutlineInputBorder(), fillColor: Colors.white, filled: true)
+                      )
+                    else
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(10), color: Colors.white),
+                        child: ListView.builder(
+                          shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+                          itemCount: variantMatrix.length,
+                          itemBuilder: (context, index) {
+                            var item = variantMatrix[index];
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: Row(
+                                children:[
+                                  Expanded(flex: 2, child: Text('${item['color']} - ${item['size']} ${unitController.text}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    flex: 1,
+                                    child: TextFormField(
+                                      initialValue: item['stock'].toString(),
+                                      keyboardType: TextInputType.number,
+                                      decoration: const InputDecoration(labelText: 'Stock', isDense: true, border: OutlineInputBorder()),
+                                      onChanged: (val) {
+                                        variantMatrix[index]['stock'] = int.tryParse(val) ?? 0;
+                                        _calculateTotalStock();
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity, height: 50,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                  onPressed: _updateProduct, 
+                  icon: const Icon(Icons.check_circle, color: Colors.white),
+                  label: const Text('INSTANT UPDATE STOCK', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                ),
+              ),
+              const SizedBox(height: 40),
+              const Center(child: Text('Want to change Name, Price or Description?', style: TextStyle(color: Colors.grey))),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity, height: 45,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.blue), foregroundColor: Colors.blue),
+                  onPressed: () => setState(() => isStockUpdateOnly = false), 
+                  icon: const Icon(Icons.edit),
+                  label: const Text('Unlock Full Edit Mode (Requires Approval)')
+                ),
+              ),
+            ] 
+            
+            // 🔴 ফুল এডিট মোড (আপলোড পেজের মতো)
+            else ...[
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red.shade200)),
+                child: const Row(children: [Icon(Icons.warning, color: Colors.red), SizedBox(width: 10), Expanded(child: Text('Full Edit Mode: Updating this will send the product to Admin for approval again.', style: TextStyle(color: Colors.red, fontSize: 12)))]),
+              ),
+              const SizedBox(height: 20),
+              
+              const Text('Product Images', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 70,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: existingImageUrls.length,
+                  itemBuilder: (context, index) {
+                    return Container(
+                      width: 70, margin: const EdgeInsets.only(right: 10),
+                      decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade300), image: DecorationImage(image: NetworkImage(existingImageUrls[index]), fit: BoxFit.cover)),
+                    );
+                  }
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              Builder(
+                builder: (context) {
+                  List<String> catList = ['Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 'Watches', 'Baby & Toys', 'Groceries', 'Automotive', 'Women\'s Bags', 'Men\'s Wallets', 'Muslim Fashion', 'Games & Hobbies', 'Computers', 'Sports & Outdoor', 'Men Shoes', 'Cameras', 'Travel & Luggage'];
+                  if (selectedCategory != null && !catList.contains(selectedCategory)) catList.add(selectedCategory!);
+                  return DropdownButtonFormField<String>(
+                    decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
+                    initialValue: selectedCategory,
+                    items: catList.map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(),
+                    onChanged: (val) => setState(() => selectedCategory = val),
                   );
                 }
               ),
-            ),
-            const SizedBox(height: 20),
+              const SizedBox(height: 15),
 
-            DropdownButtonFormField<String>(
-              decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
-              initialValue: selectedCategory,
-              items:['Fashion', 'Electronics', 'Mobiles', 'Home Decor', 'Beauty', 'Watches', 'Baby & Toys', 'Groceries', 'Automotive', 'Women\'s Bags', 'Men\'s Wallets', 'Muslim Fashion', 'Games & Hobbies', 'Computers', 'Sports & Outdoor', 'Men Shoes', 'Cameras', 'Travel & Luggage'].map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(),
-              onChanged: isStockUpdateOnly ? null : (val) => setState(() => selectedCategory = val),
-            ),
-            const SizedBox(height: 15),
-
-            TextField(
-              controller: nameController, 
-              enabled: !isStockUpdateOnly, // অন থাকলে এডিট করা যাবে না
-              decoration: InputDecoration(labelText: 'Product Name', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder())
-            ),
-            const SizedBox(height: 15),
-            
-            Row(
-              children:[
-                Expanded(child: TextField(controller: priceController, enabled: !isStockUpdateOnly, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'Base Price (৳)', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder()))),
-                const SizedBox(width: 10),
-                Expanded(child: TextField(controller: originalPriceController, enabled: !isStockUpdateOnly, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'Original Price (৳)', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder()))),
-                const SizedBox(width: 10),
-                Expanded(child: TextField(controller: stockController, readOnly: true, decoration: InputDecoration(labelText: 'Total Stock', filled: true, fillColor: Colors.amber.shade50, border: const OutlineInputBorder()))),
+              TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Product Name', border: OutlineInputBorder())),
+              const SizedBox(height: 15),
+              
+              Row(
+                children:[
+                  Expanded(child: TextField(controller: priceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base Price (৳)', border: OutlineInputBorder()))),
+                  const SizedBox(width: 10),
+                  Expanded(child: TextField(controller: originalPriceController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Original Price (৳)', border: OutlineInputBorder()))),
+                  const SizedBox(width: 10),
+                  Expanded(child: TextField(controller: stockController, readOnly: hasRealVariants, decoration: InputDecoration(labelText: 'Total Stock', filled: hasRealVariants, fillColor: Colors.grey.shade100, border: const OutlineInputBorder()))),
+                ],
+              ),
+              const SizedBox(height: 20),
+              
+              if (hasRealVariants) ...[
+                const Text('Edit Variants & Stock', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(10)),
+                  child: ListView.builder(
+                    shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+                    itemCount: variantMatrix.length,
+                    itemBuilder: (context, index) {
+                      var item = variantMatrix[index];
+                      bool isFirst = index == 0;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Row(
+                          children:[
+                            Expanded(flex: 2, child: Text('${item['color']} - ${item['size']} ${unitController.text}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                            const SizedBox(width: 5),
+                            Expanded(
+                              flex: 1,
+                              child: TextFormField(
+                                initialValue: item['stock'].toString(),
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(labelText: 'Stock', isDense: true, border: OutlineInputBorder()),
+                                onChanged: (val) {
+                                  variantMatrix[index]['stock'] = int.tryParse(val) ?? 0;
+                                  _calculateTotalStock();
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Expanded(
+                              flex: 1,
+                              child: TextFormField(
+                                initialValue: item['price'].toString(),
+                                keyboardType: TextInputType.number,
+                                enabled: !isFirst,
+                                decoration: InputDecoration(labelText: '+ Price', isDense: true, filled: isFirst, border: const OutlineInputBorder()),
+                                onChanged: (val) => variantMatrix[index]['price'] = int.tryParse(val) ?? 0,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+                  ),
+                ),
+                const SizedBox(height: 20),
               ],
-            ),
-            const SizedBox(height: 20),
-            
-            // ভেরিয়েন্ট এডিটর
-            const Text('Edit Variants & Stock', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(10)),
-              child: ListView.builder(
-                shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
-                itemCount: variantMatrix.length,
-                itemBuilder: (context, index) {
-                  var item = variantMatrix[index];
-                  bool isFirst = index == 0;
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Row(
-                      children:[
-                        Expanded(flex: 2, child: Text('${item['color']} - ${item['size']} ${unitController.text}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-                        const SizedBox(width: 5),
-                        Expanded(
-                          flex: 1,
-                          child: TextFormField(
-                            initialValue: item['stock'].toString(),
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(labelText: 'Stock', isDense: true, border: OutlineInputBorder()),
-                            onChanged: (val) {
-                              variantMatrix[index]['stock'] = int.tryParse(val) ?? 0;
-                              _calculateTotalStock();
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 5),
-                        Expanded(
-                          flex: 1,
-                          child: TextFormField(
-                            initialValue: item['price'].toString(),
-                            keyboardType: TextInputType.number,
-                            enabled: !isStockUpdateOnly && !isFirst, // স্টক মোডে এবং প্রথমটাতে দাম বদলানো যাবে না
-                            decoration: InputDecoration(labelText: '+ Price', isDense: true, filled: isStockUpdateOnly || isFirst, border: const OutlineInputBorder()),
-                            onChanged: (val) => variantMatrix[index]['price'] = int.tryParse(val) ?? 0,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-              ),
-            ),
-            const SizedBox(height: 20),
 
-            TextField(
-              controller: descController, 
-              enabled: !isStockUpdateOnly,
-              maxLines: 4, 
-              decoration: InputDecoration(labelText: 'Description', filled: isStockUpdateOnly, fillColor: Colors.grey.shade100, border: const OutlineInputBorder())
-            ),
-            const SizedBox(height: 40),
-            
-            SizedBox(
-              width: double.infinity, height: 50,
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: isStockUpdateOnly ? Colors.green : Colors.blue),
-                onPressed: _updateProduct, 
-                icon: Icon(isStockUpdateOnly ? Icons.flash_on : Icons.send, color: Colors.white),
-                label: Text(isStockUpdateOnly ? 'INSTANT UPDATE STOCK' : 'UPDATE & REQUEST APPROVAL', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+              TextField(controller: descController, maxLines: 4, decoration: const InputDecoration(labelText: 'Description', border: OutlineInputBorder())),
+              const SizedBox(height: 40),
+              
+              SizedBox(
+                width: double.infinity, height: 50,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                  onPressed: _updateProduct, 
+                  icon: const Icon(Icons.send, color: Colors.white),
+                  label: const Text('UPDATE & REQUEST APPROVAL', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                ),
               ),
-            )
+              const SizedBox(height: 10),
+              Center(
+                child: TextButton(
+                  onPressed: () => setState(() => isStockUpdateOnly = true), 
+                  child: const Text('Cancel & Go Back to Quick Stock', style: TextStyle(color: Colors.grey))
+                ),
+              )
+            ]
           ],
         ),
       ),
@@ -1552,42 +1667,75 @@ class SellerOrderManagement extends StatelessWidget {
       return const Text('Awaiting Admin', style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 11));
     } 
     else if (status == 'Processing') {
-      return ElevatedButton.icon(
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, visualDensity: VisualDensity.compact),
-        onPressed: () async {
-          await FirebaseFirestore.instance.collection('orders').doc(orderId).update({
-            'status': 'Ready to Ship',
-            'ready_to_ship_at': FieldValue.serverTimestamp(),
-          });
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 🔴 Seller Cancel Button (No Spinner, Instant Action)
+          OutlinedButton(
+            style: OutlinedButton.styleFrom(foregroundColor: Colors.red, side: const BorderSide(color: Colors.red), visualDensity: VisualDensity.compact),
+            onPressed: () {
+              // ১. সাথে সাথে ডাটাবেস আপডেট (কোনো লোডিং ছাড়া)
+              FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Cancelled'});
+              
+              // ২. ব্যাকগ্রাউন্ডে নোটিফিকেশন পাঠানো
+              FirebaseFirestore.instance.collection('notifications').add({
+                'target_user_id': customerId,
+                'title': 'Order Cancelled ❌',
+                'message': 'দুঃখিত, স্টক না থাকায় সেলার আপনার অর্ডারটি বাতিল করেছেন।',
+                'sent_at': FieldValue.serverTimestamp(),
+              });
 
-          // ✅ এখন আর লাল দাগ আসবে না, কারণ আমরা listLength ব্যবহার করছি
-          if (listLength <= 1) {
-            DefaultTabController.of(context).animateTo(1); 
-          }
-          
-          await _sendCustomerNotification(customerId, orderId, 'packed and waiting for rider pickup');
-          
-          // রাইডারদের ব্রডকাস্ট (রিং বাজানোর জন্য type: rider_job দেওয়া হলো)
-          await FirebaseFirestore.instance.collection('notifications').add({
-            'title': 'New Delivery Available! 🛵',
-            'message': 'একটি নতুন পার্সেল ডেলিভারির জন্য প্রস্তুত। দ্রুত এক্সেপ্ট করুন।',
-            'topic': 'riders', 
-            'type': 'rider_job', // 🔴 এটি খুবই জরুরি রিংটোনের জন্য
-            'data': {'screen': 'rider_dashboard'},
-            'sent_at': FieldValue.serverTimestamp(),
-          });
-          
-          // অ্যাডমিনকে নোটিফিকেশন
-          await FirebaseFirestore.instance.collection('notifications').add({
-            'title': 'Order Packed 📦',
-            'message': 'অর্ডার #${orderId.substring(0, 8).toUpperCase()} সেলার প্যাক করেছেন।',
-            'topic': 'admins',
-            'sent_at': FieldValue.serverTimestamp(),
-          });
-          
-          if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order packed! Notifying nearby riders...')));
-        }, 
-        icon: const Icon(Icons.check_circle, color: Colors.white, size: 14), label: const Text('Pack', style: TextStyle(color: Colors.white, fontSize: 12))
+              FirebaseFirestore.instance.collection('notifications').add({
+                'title': 'Order Cancelled by Seller ❌',
+                'message': 'সেলার একটি কনফার্ম করা অর্ডার বাতিল করেছেন (#${orderId.substring(0, 8).toUpperCase()})।',
+                'topic': 'admins',
+                'sent_at': FieldValue.serverTimestamp(),
+              });
+              
+              // ৩. সাথে সাথে মেসেজ দেখানো
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order Cancelled!'), backgroundColor: Colors.red));
+            },
+            child: const Text('Cancel', style: TextStyle(fontSize: 12))
+          ),
+          const SizedBox(width: 8),
+
+          // 🟠 Pack Button
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, visualDensity: VisualDensity.compact),
+            onPressed: () async {
+              await FirebaseFirestore.instance.collection('orders').doc(orderId).update({
+                'status': 'Ready to Ship',
+                'ready_to_ship_at': FieldValue.serverTimestamp(),
+              });
+
+              if (listLength <= 1) {
+                DefaultTabController.of(context).animateTo(1); 
+              }
+              
+              await _sendCustomerNotification(customerId, orderId, 'packed and waiting for rider pickup');
+              
+              await FirebaseFirestore.instance.collection('notifications').add({
+                'title': 'New Delivery Available! 🛵',
+                'message': 'একটি নতুন পার্সেল ডেলিভারির জন্য প্রস্তুত। দ্রুত অ্যাপে ঢুকে এক্সেপ্ট করুন।',
+                'topic': 'riders', 
+                'type': 'rider_job',
+                'data': {'screen': 'rider_dashboard'},
+                'sent_at': FieldValue.serverTimestamp(),
+              });
+              
+              await FirebaseFirestore.instance.collection('notifications').add({
+                'title': 'Order Packed 📦',
+                'message': 'অর্ডার #${orderId.substring(0, 8).toUpperCase()} সেলার প্যাক করেছেন।',
+                'topic': 'admins',
+                'sent_at': FieldValue.serverTimestamp(),
+              });
+              
+              if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order packed! Notifying nearby riders...')));
+            }, 
+            icon: const Icon(Icons.check_circle, color: Colors.white, size: 14), 
+            label: const Text('Pack', style: TextStyle(color: Colors.white, fontSize: 12))
+          )
+        ],
       );
     }
     else if (status == 'Ready to Ship' || status == 'Dispatched') {

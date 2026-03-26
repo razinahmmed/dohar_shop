@@ -694,9 +694,24 @@ class RiderTaskManagement extends StatelessWidget {
                             'status': 'In-Transit', 
                             'in_transit_at': FieldValue.serverTimestamp()
                           });
+                          await FirebaseFirestore.instance.collection('orders').doc(doc.id).update({
+                            'status': 'In-Transit', 
+                            'in_transit_at': FieldValue.serverTimestamp()
+                          });
+                          // কাস্টমারকে
                           await FirebaseFirestore.instance.collection('notifications').add({
                             'target_user_id': data['user_id'], 'title': 'Order Picked Up 🛵', 'message': 'আপনার পার্সেলটি রাইডারের কাছে দেওয়া হয়েছে এবং আপনার ঠিকানায় যাচ্ছে।', 'sent_at': FieldValue.serverTimestamp(),
                           });
+                          // সেলারকে
+                          List<dynamic> orderItems = data['items'] ?? [];
+                          if (orderItems.isNotEmpty && orderItems[0]['seller_id'] != null) {
+                            await FirebaseFirestore.instance.collection('notifications').add({
+                              'target_user_id': orderItems[0]['seller_id'],
+                              'title': 'Parcel Handed Over ✅',
+                              'message': 'রাইডার সফলভাবে আপনার কাছ থেকে পার্সেলটি রিসিভ করেছেন।',
+                              'sent_at': FieldValue.serverTimestamp(),
+                            });
+                          }
                           if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pickup Verified! Move to In-Transit tab.')));
                         } else if (status == 'In-Transit') {
                           // ✅ Deliver Now বাটনে ক্লিক করলে এখন সরাসরি ২ নম্বর ট্যাবে (Route) নিয়ে যাবে

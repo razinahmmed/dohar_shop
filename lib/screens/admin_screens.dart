@@ -20,14 +20,16 @@ import 'package:dohar_shop/notification_service.dart';
 // অ্যাডমিন প্যানেল: Main Screen (Web Responsive + Badges)
 // ==========================================
 class AdminMainScreen extends StatefulWidget {
-  const AdminMainScreen({super.key});
+  final int initialPage; // 🔴 শুধু এই লাইনটি অ্যাড করুন
+  const AdminMainScreen({super.key, this.initialPage = 0}); // 🔴 এখানে this.initialPage = 0 অ্যাড করুন
 
   @override
   State<AdminMainScreen> createState() => _AdminMainScreenState();
 }
 
 class _AdminMainScreenState extends State<AdminMainScreen> {
-  int _selectedIndex = 0;
+  // 🔴 এখানে _selectedIndex = 0 না দিয়ে late লিখুন
+  late int _selectedIndex;
 
   final List<Widget> _pages =[
     const AdminDashboard(),       
@@ -36,6 +38,13 @@ class _AdminMainScreenState extends State<AdminMainScreen> {
     const AdminFinanceReports(),  
     const AdminSettings(),        
   ];
+
+  // 🔴 এই ব্লকটি নতুন করে যোগ করুন
+  @override
+  void initState() {
+    super.initState();
+    _selectedIndex = widget.initialPage; 
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -187,6 +196,18 @@ class AdminDashboard extends StatelessWidget {
               ListTile(leading: const Icon(Icons.motorcycle, color: Colors.purple), title: const Text('Manage Riders', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManageRidersPage())); }),
               ListTile(leading: const Icon(Icons.map, color: Colors.green), title: const Text('Delivery Zones & Charges', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminDeliveryZonePage())); }),
               const Divider(height: 30, thickness: 1),
+
+              // 🔴 নতুন ম্যানুয়াল অর্ডার বাটন
+              ListTile(
+                leading: const Icon(Icons.support_agent, color: Colors.deepOrange), 
+                title: const Text('Tele-Sales (Manual Order)', style: TextStyle(fontWeight: FontWeight.bold)), 
+                subtitle: const Text('কল রিসিভ করে কাস্টমারের অর্ডার দিন', style: TextStyle(fontSize: 10)),
+                onTap: () { 
+                  Navigator.pop(context); 
+                  Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManualOrderPage())); 
+                }
+              ),
+
               ListTile(
                 leading: const Icon(Icons.logout, color: Colors.red),
                 title: const Text('Secure Log Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
@@ -1820,7 +1841,7 @@ class _AdminOrderControlState extends State<AdminOrderControl> {
                         child: const Text('Details', style: TextStyle(fontSize: 12, color: Colors.teal)),
                       ),
                       const SizedBox(width: 8),
-                      _buildActionButton(doc.id, status, data),
+                      _buildActionButton(context, doc.id, status, data, orders.length), // 🔴 context এবং length যোগ করা হলো
                     ],
                   )
                 ],
@@ -1832,40 +1853,74 @@ class _AdminOrderControlState extends State<AdminOrderControl> {
     );
   }
 
-  Widget _buildActionButton(String orderId, String status, Map<String, dynamic> orderData) {
+  Widget _buildActionButton(BuildContext context, String orderId, String status, Map<String, dynamic> orderData, int listLength) {
     if (status == 'Pending') {
-      return ElevatedButton(
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, visualDensity: VisualDensity.compact), 
-        onPressed: () async {
-          await FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Processing', 'processing_at': FieldValue.serverTimestamp()});
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 🔴 Cancel Button (No Spinner, Instant Action)
+          OutlinedButton(
+            style: OutlinedButton.styleFrom(foregroundColor: Colors.red, side: const BorderSide(color: Colors.red), visualDensity: VisualDensity.compact),
+            onPressed: () {
+              // ১. সাথে সাথে ডাটাবেস আপডেট (কোনো লোডিং ছাড়া)
+              FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Cancelled'});
+              
+              // ২. ব্যাকগ্রাউন্ডে নোটিফিকেশন পাঠানো
+              FirebaseFirestore.instance.collection('notifications').add({
+                'target_user_id': orderData['user_id'],
+                'title': 'Order Cancelled ❌',
+                'message': 'দুঃখিত, কোনো বিশেষ কারণে আপনার অর্ডারটি বাতিল করা হয়েছে।',
+                'sent_at': FieldValue.serverTimestamp(),
+              });
+              
+              // ৩. সাথে সাথে মেসেজ দেখানো
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order Cancelled!'), backgroundColor: Colors.red));
+            },
+            child: const Text('Cancel', style: TextStyle(fontSize: 12))
+          ),
+          const SizedBox(width: 8),
           
-          List<dynamic> items = orderData['items'] ??[];
-          Set<String> sellerIds = {};
-          for(var item in items) {
-            if(item['seller_id'] != null && item['seller_id'] != 'unknown') {
-              sellerIds.add(item['seller_id']);
-            }
-          }
-          
-          for(String sId in sellerIds) {
-            await FirebaseFirestore.instance.collection('notifications').add({
-              'target_user_id': sId,
-              'title': 'New Order to Process 📦',
-              'message': 'অ্যাডমিন একটি অর্ডার কনফার্ম করেছেন (#${orderId.substring(0, 8).toUpperCase()})। দয়া করে প্যাক করুন।',
-              'sent_at': FieldValue.serverTimestamp(),
-            });
+          // 🔵 Confirm Button
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, visualDensity: VisualDensity.compact), 
+            onPressed: () async {
+              await FirebaseFirestore.instance.collection('orders').doc(orderId).update({'status': 'Processing', 'processing_at': FieldValue.serverTimestamp()});
+              
+              if (listLength <= 1) {
+                DefaultTabController.of(context).animateTo(1); 
+              }
+              
+              List<dynamic> items = orderData['items'] ?? [];
+              Set<String> sellerIds = {};
+              for(var item in items) {
+                if(item['seller_id'] != null && item['seller_id'] != 'unknown') {
+                  sellerIds.add(item['seller_id']);
+                }
+              }
+              
+              for(String sId in sellerIds) {
+                await FirebaseFirestore.instance.collection('notifications').add({
+                  'target_user_id': sId,
+                  'title': 'New Order to Process 📦',
+                  'message': 'অ্যাডমিন একটি অর্ডার কনফার্ম করেছেন (#${orderId.substring(0, 8).toUpperCase()})। দয়া করে প্যাক করুন।',
+                  'sent_at': FieldValue.serverTimestamp(),
+                  'data': {'screen': 'seller_orders'} 
+                });
+              }
 
-            // কাস্টমারকে নোটিফিকেশন
-            await FirebaseFirestore.instance.collection('notifications').add({
-              'target_user_id': orderData['user_id'],
-              'title': 'Order Confirmed! ✅',
-              'message': 'আপনার অর্ডারটি অ্যাডমিন কনফার্ম করেছেন। সেলার এখন প্যাকিং শুরু করবেন।',
-              'sent_at': FieldValue.serverTimestamp(),
-              'data': {'screen': 'orders'}
-            });
-          }
-        }, 
-        child: const Text('Confirm', style: TextStyle(color: Colors.white, fontSize: 12))
+              if (orderData['user_id'] != null) {
+                await FirebaseFirestore.instance.collection('notifications').add({
+                  'target_user_id': orderData['user_id'],
+                  'title': 'Order Confirmed! ✅',
+                  'message': 'আপনার অর্ডারটি অ্যাডমিন কনফার্ম করেছেন। সেলার এখন প্যাকিং শুরু করবেন।',
+                  'sent_at': FieldValue.serverTimestamp(),
+                  'data': {'screen': 'orders'} 
+                });
+              }
+            }, 
+            child: const Text('Confirm', style: TextStyle(color: Colors.white, fontSize: 12))
+          )
+        ],
       );
     } 
     else if (status == 'Processing') {
@@ -3846,6 +3901,79 @@ class _AdminBannerManagementPageState extends State<AdminBannerManagementPage> {
       appBar: AppBar(title: const Text('Manage Banners'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
       body: Column(
         children: [
+          // 🔴 নতুন: Default Background Banner Upload & Delete Section
+          StreamBuilder<DocumentSnapshot>(
+            stream: FirebaseFirestore.instance.collection('app_config').doc('default_banner').snapshots(),
+            builder: (context, snapshot) {
+              bool hasBanner = false;
+              if (snapshot.hasData && snapshot.data!.exists) {
+                var data = snapshot.data!.data() as Map<String, dynamic>?;
+                if (data != null && data['image_url'] != null && data['image_url'].toString().isNotEmpty) {
+                  hasBanner = true;
+                }
+              }
+
+              return Container(
+                color: Colors.white,
+                padding: const EdgeInsets.all(15),
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    width: 50, height: 50,
+                    decoration: BoxDecoration(color: Colors.orange.shade50, borderRadius: BorderRadius.circular(8)),
+                    child: const Icon(Icons.wallpaper, color: Colors.deepOrange),
+                  ),
+                  title: const Text('Set Default Background', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  subtitle: const Text('ব্যানার লোড হতে দেরি হলে এই ছবিটি কাস্টমার দেখতে পাবে।', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (hasBanner)
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          tooltip: 'Remove Background',
+                          onPressed: () async {
+                            await FirebaseFirestore.instance.collection('app_config').doc('default_banner').delete();
+                            if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Background Removed!')));
+                          }
+                        ),
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.deepOrange), foregroundColor: Colors.deepOrange),
+                        onPressed: () async {
+                          final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 50);
+                          if (image == null) return;
+                          
+                          showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+                          
+                          String fileName = 'default_banner_bg.jpg';
+                          Reference ref = FirebaseStorage.instance.ref().child('banners').child(fileName);
+                          if (kIsWeb) {
+                            await ref.putData(await image.readAsBytes(), SettableMetadata(contentType: 'image/jpeg'));
+                          } else {
+                            await ref.putFile(File(image.path));
+                          }
+                          
+                          String downloadUrl = await ref.getDownloadURL();
+                          await FirebaseFirestore.instance.collection('app_config').doc('default_banner').set({
+                            'image_url': downloadUrl,
+                            'updated_at': FieldValue.serverTimestamp()
+                          });
+                          
+                          if(context.mounted) {
+                            Navigator.of(context, rootNavigator: true).pop();
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Background Image Updated!'), backgroundColor: Colors.green));
+                          }
+                        }, 
+                        child: const Text('Upload')
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+          ),
+          const Divider(height: 1, thickness: 3, color: Color(0xFFEEEEEE)),
+
           Padding(
             padding: const EdgeInsets.all(15.0),
             child: ElevatedButton.icon(
@@ -4705,6 +4833,211 @@ class AdminSettlementHistoryPage extends StatelessWidget {
             },
           );
         }
+      ),
+    );
+  }
+}
+
+// ==========================================
+// [NEW] Admin Tele-Sales (Manual Order Page)
+// ==========================================
+class AdminManualOrderPage extends StatefulWidget {
+  const AdminManualOrderPage({super.key});
+
+  @override
+  State<AdminManualOrderPage> createState() => _AdminManualOrderPageState();
+}
+
+class _AdminManualOrderPageState extends State<AdminManualOrderPage> {
+  final TextEditingController phoneCtrl = TextEditingController();
+  final TextEditingController nameCtrl = TextEditingController();
+  final TextEditingController addressCtrl = TextEditingController();
+  
+  final TextEditingController skuCtrl = TextEditingController();
+  final TextEditingController qtyCtrl = TextEditingController(text: '1');
+
+  Map<String, dynamic>? foundProduct;
+  String? foundProductId;
+  bool isSearchingCustomer = false;
+  bool isSearchingProduct = false;
+
+  // কাস্টমারের হিস্ট্রি খোঁজা
+  Future<void> _searchCustomer() async {
+    if (phoneCtrl.text.isEmpty) return;
+    setState(() => isSearchingCustomer = true);
+    
+    // ফোন নাম্বার দিয়ে আগের অর্ডার থেকে ঠিকানা খোঁজা
+    var orderSnap = await FirebaseFirestore.instance.collection('orders').where('shipping_phone', isEqualTo: phoneCtrl.text.trim()).orderBy('order_date', descending: true).limit(1).get();
+    
+    if (orderSnap.docs.isNotEmpty) {
+      var data = orderSnap.docs.first.data();
+      nameCtrl.text = data['shipping_name'] ?? '';
+      addressCtrl.text = data['shipping_address_text'] ?? '';
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('পুরোনো কাস্টমারের তথ্য পাওয়া গেছে! ✅'), backgroundColor: Colors.green));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('এটি নতুন কাস্টমার। নাম ও ঠিকানা টাইপ করুন।'), backgroundColor: Colors.orange));
+    }
+    setState(() => isSearchingCustomer = false);
+  }
+
+  // প্রোডাক্ট কোড (SKU) দিয়ে প্রোডাক্ট খোঁজা
+  Future<void> _searchProduct() async {
+    if (skuCtrl.text.isEmpty) return;
+    setState(() => isSearchingProduct = true);
+    
+    var prodSnap = await FirebaseFirestore.instance.collection('products').where('sku', isEqualTo: skuCtrl.text.trim().toUpperCase()).limit(1).get();
+    
+    if (prodSnap.docs.isNotEmpty) {
+      setState(() {
+        foundProduct = prodSnap.docs.first.data();
+        foundProductId = prodSnap.docs.first.id;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('প্রোডাক্ট পাওয়া গেছে! ✅'), backgroundColor: Colors.green));
+    } else {
+      setState(() => foundProduct = null);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('এই কোডের কোনো প্রোডাক্ট নেই! ❌'), backgroundColor: Colors.red));
+    }
+    setState(() => isSearchingProduct = false);
+  }
+
+  // ফাইনাল অর্ডার প্লেস করা
+  Future<void> _placeManualOrder() async {
+    if (nameCtrl.text.isEmpty || phoneCtrl.text.isEmpty || addressCtrl.text.isEmpty || foundProduct == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('কাস্টমারের সব তথ্য এবং প্রোডাক্ট সিলেক্ট করুন!'), backgroundColor: Colors.red));
+      return;
+    }
+
+    int qty = int.tryParse(qtyCtrl.text) ?? 1;
+    int price = foundProduct!['price'] ?? 0;
+    int deliveryFee = 60; // ডিফল্ট ডেলিভারি চার্জ
+    int grandTotal = (price * qty) + deliveryFee;
+
+    showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+    try {
+      // গেস্ট অর্ডার হিসেবে সেভ করা
+      await FirebaseFirestore.instance.collection('orders').add({
+        'user_id': 'guest_${phoneCtrl.text.trim()}', // গেস্ট কাস্টমার
+        'items': [{
+          'product_id': foundProductId,
+          'product_name': foundProduct!['product_name'],
+          'price': price,
+          'quantity': qty,
+          'seller_id': foundProduct!['seller_id'] ?? 'unknown',
+          'image_url': (foundProduct!['image_urls'] as List).isNotEmpty ? foundProduct!['image_urls'][0] : '',
+          'selected_color': '',
+          'selected_size': '',
+        }],
+        'total_amount': grandTotal,
+        'payment_method': 'Cash on Delivery',
+        'status': 'Pending', // অ্যাডমিন চাইলে পরে কনফার্ম করবে
+        'order_date': FieldValue.serverTimestamp(),
+        'shipping_name': nameCtrl.text.trim(),
+        'shipping_phone': phoneCtrl.text.trim(),
+        'shipping_address_text': addressCtrl.text.trim(),
+        'is_manual_order': true, // চেনার জন্য
+      });
+
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop(); // Loader বন্ধ
+      
+      // ফর্ম ক্লিয়ার
+      phoneCtrl.clear(); nameCtrl.clear(); addressCtrl.clear(); skuCtrl.clear(); 
+      setState(() => foundProduct = null);
+
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('অর্ডার সফলভাবে প্লেস করা হয়েছে! 🎉'), backgroundColor: Colors.green));
+    } catch (e) {
+      Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(title: const Text('Tele-Sales (Manual Order)'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ১. কাস্টমার সেকশন
+            Container(
+              padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.deepOrange.shade200)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Customer Details', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.deepOrange)),
+                  const SizedBox(height: 15),
+                  Row(
+                    children: [
+                      Expanded(child: TextField(controller: phoneCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Phone Number', border: OutlineInputBorder(), isDense: true))),
+                      const SizedBox(width: 10),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                        onPressed: _searchCustomer, 
+                        child: isSearchingCustomer ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white)) : const Text('Search History', style: TextStyle(color: Colors.white))
+                      )
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Customer Name', border: OutlineInputBorder(), isDense: true)),
+                  const SizedBox(height: 10),
+                  TextField(controller: addressCtrl, maxLines: 2, decoration: const InputDecoration(labelText: 'Full Address', border: OutlineInputBorder(), isDense: true)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // ২. প্রোডাক্ট সেকশন
+            Container(
+              padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.teal.shade200)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Product Selection', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.teal)),
+                  const SizedBox(height: 15),
+                  Row(
+                    children: [
+                      Expanded(child: TextField(controller: skuCtrl, decoration: const InputDecoration(labelText: 'Product Code (SKU)', hintText: 'e.g. DS-12345', border: OutlineInputBorder(), isDense: true))),
+                      const SizedBox(width: 10),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                        onPressed: _searchProduct, 
+                        child: isSearchingProduct ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white)) : const Text('Find Product', style: TextStyle(color: Colors.white))
+                      )
+                    ],
+                  ),
+                  
+                  if (foundProduct != null) ...[
+                    const Divider(height: 30),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Container(width: 50, height: 50, decoration: BoxDecoration(borderRadius: BorderRadius.circular(5), image: DecorationImage(image: NetworkImage((foundProduct!['image_urls'] as List).isNotEmpty ? foundProduct!['image_urls'][0] : ''), fit: BoxFit.cover))),
+                      title: Text(foundProduct!['product_name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      subtitle: Text('Price: ৳${foundProduct!['price']} | Stock: ${foundProduct!['stock']}', style: const TextStyle(color: Colors.deepOrange)),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(controller: qtyCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Quantity', border: OutlineInputBorder(), isDense: true)),
+                  ]
+                ],
+              ),
+            ),
+            const SizedBox(height: 30),
+
+            // ৩. প্লেস অর্ডার বাটন
+            SizedBox(
+              width: double.infinity, height: 55,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.green, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                onPressed: _placeManualOrder, 
+                icon: const Icon(Icons.shopping_bag, color: Colors.white),
+                label: const Text('PLACE ORDER FOR CUSTOMER (COD)', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
+              ),
+            )
+          ],
+        ),
       ),
     );
   }

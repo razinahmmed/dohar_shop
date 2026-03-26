@@ -68,24 +68,30 @@ class NotificationService {
 
   // ২. নোটিফিকেশন ক্লিক করলে নির্দিষ্ট পেজে যাওয়ার মাস্টার লজিক
   static void handleNotificationNavigation(String? screen) {
-    // ✅ রিংটোন বাজা বন্ধ করার জন্য নোটিফিকেশন আইডি ৯৯৯ বাতিল করা হলো
     _flutterLocalNotificationsPlugin.cancel(999); 
     
     if (screen == null) return;
 
     if (screen == 'rider_dashboard') {
-      // রাইডারকে সরাসরি ড্যাশবোর্ড বা রুট ট্যাবে পাঠানোর জন্য
       navigatorKey.currentState?.pushAndRemoveUntil(
-        MaterialPageRoute(builder: (context) => const RiderMainScreen(initialPage: 0)), 
+        MaterialPageRoute(builder: (context) => const RiderMainScreen(initialPage: 1)), // Tasks Tab
         (route) => false
       );
     } else if (screen == 'notifications') {
       navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const CustomerNotificationPage()));
     } else if (screen == 'admin_orders') {
-      navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const AdminMainScreen()));
+      navigatorKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (context) => const AdminMainScreen(initialPage: 2)), // Admin Orders Tab
+        (route) => false
+      );
     } else if (screen == 'seller_orders') {
       navigatorKey.currentState?.pushAndRemoveUntil(
-        MaterialPageRoute(builder: (context) => const SellerMainScreen(initialPage: 2)), 
+        MaterialPageRoute(builder: (context) => const SellerMainScreen(initialPage: 2)), // Seller Orders Tab
+        (route) => false
+      );
+    } else if (screen == 'orders') {
+      navigatorKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (context) => const MainScreen(initialPage: 3)), // Customer Profile Tab
         (route) => false
       );
     }
@@ -146,27 +152,6 @@ class NotificationService {
         ),
       ),
       payload: 'rider_dashboard',
-    );
-  }
-
-  // ৬. অ্যাপ বন্ধ থাকা অবস্থায় নোটিফিকেশন দেখানো
-  static Future<void> showBackgroundNotification(RemoteMessage message) async {
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'rider_job_channel',
-      'Rider Job Alerts',
-      importance: Importance.max,
-      priority: Priority.high,
-      sound: RawResourceAndroidNotificationSound('rider_alert'),
-      playSound: true,
-      fullScreenIntent: true,
-    );
-
-    await _flutterLocalNotificationsPlugin.show(
-      message.hashCode,
-      message.notification?.title ?? "🚨 নতুন আপডেট",
-      message.notification?.body ?? "অ্যাপ চেক করুন।",
-      const NotificationDetails(android: androidDetails),
-      payload: message.data['screen'],
     );
   }
 

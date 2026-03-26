@@ -27,17 +27,24 @@ exports.sendNotification = onDocumentCreated("notifications/{id}", async (event)
     let channelId = "d_shop_channel";
     let soundName = "default";
 
+    // শুধুমাত্র "new_order" এবং "rider_job" হলে অ্যালার্ম বাজবে। বাকি সব ক্ষেত্রে ডিফল্ট সাউন্ড হবে।
     if (topicName === "riders" || type === "rider_job") {
         channelId = "rider_job_channel";
         soundName = "rider_alert";
-    } else if (topicName === "admins") {
+    } else if (topicName === "admins" && type === "new_order") {
         channelId = "admin_order_channel";
         soundName = "admin_order";
+    } else {
+        channelId = "d_shop_channel";
+        soundName = "default";
     }
 
     const messagePayload = {
-        notification: { title: title, body: message },
-        // [FIXED] ফোনের কাছে type পাঠানো হচ্ছে
+        notification: { 
+            title: title, 
+            body: message,
+            image: data.image_url ? data.image_url : null // 🔴 ছবি দেখানোর জন্য এটি অ্যাড করা হলো
+        },
         data: { screen: screen, type: type, click_action: "FLUTTER_NOTIFICATION_CLICK" }, 
         android: {
             priority: "high",

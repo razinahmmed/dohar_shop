@@ -18,16 +18,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 // ফাইলটির একদম শুরুতে এই Global Key টি ডিক্লেয়ার করুন (এটি নেভিগেশনের জন্য লাগবে)
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
-// 🔴 ১. ব্যাকগ্রাউন্ড মেসেজ হ্যান্ডলার (অ্যাপ বন্ধ থাকলেও এটি কাজ করবে)
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
-  
-  // [FIXED] সার্ভার থেকে type আসলে ব্যাকগ্রাউন্ডে রিংটোন বাজাবে
   if (message.data['type'] == 'rider_job') {
-    NotificationService.triggerJobAlert(); // রিংটোন বাজবে!
-  } else {
-    NotificationService.showBackgroundNotification(message);
+    NotificationService.triggerJobAlert(); // রাইডারের অ্যালার্ম
   }
 }
 

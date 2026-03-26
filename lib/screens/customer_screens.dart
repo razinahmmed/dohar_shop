@@ -26,6 +26,7 @@ import 'auth_screens.dart';
 import 'seller_screens.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../notification_service.dart';
+import 'package:share_plus/share_plus.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = 
     FlutterLocalNotificationsPlugin();
@@ -34,26 +35,27 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 // মেইন স্ক্রিন (Customer Bottom Navigation Bar + Notification Setup)
 // ==========================================
 class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+  final int initialPage;
+  const MainScreen({super.key, this.initialPage = 0});
   @override
   State<MainScreen> createState() => _MainScreenState();
 }
 
 class _MainScreenState extends State<MainScreen> {
-  // এই ভেরিয়েবলগুলো না থাকার কারণে লাল দাগ আসছিল
-  int _selectedIndex = 0;
+  late int _selectedIndex;
 
   final List<Widget> _pages = [
     const ShopeeHome(),
     const CategoryPage(),
     const CartPage(),
-    const UserDashboard(),
+    const UserDashboard(), // ইনডেক্স ৩ (Profile/Orders)
   ];
 
   @override
   void initState() {
     super.initState();
-    _setupFCMForAllRoles(); // আপনার তৈরি করা নতুন ফাংশন
+    _selectedIndex = widget.initialPage; 
+    _setupFCMForAllRoles(); 
   }
 
   // ✅ নতুন এবং ফিক্সড FCM সেটআপ ফাংশন
@@ -238,28 +240,32 @@ class _CartPageState extends State<CartPage> {
         stream: FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').snapshots(),
         builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
-          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('আপনার কার্ট খালি!', style: TextStyle(fontSize: 18, color: Colors.grey)));
+          
+          bool isCartEmpty = !snapshot.hasData || snapshot.data!.docs.isEmpty;
 
           Map<String, List<QueryDocumentSnapshot>> groupedItems = {};
           double grandTotalTaka = 0;
           int totalSelectedCount = 0;
           double totalSaved = 0;
 
-          for (var doc in snapshot.data!.docs) {
-            Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-            String sellerId = data['seller_id'] ?? 'unknown_seller';
-            if (!groupedItems.containsKey(sellerId)) groupedItems[sellerId] = [];
-            groupedItems[sellerId]!.add(doc);
+          // কার্ট খালি না হলে হিসাবগুলো করবে
+          if (!isCartEmpty) {
+            for (var doc in snapshot.data!.docs) {
+              Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+              String sellerId = data['seller_id'] ?? 'unknown_seller';
+              if (!groupedItems.containsKey(sellerId)) groupedItems[sellerId] = [];
+              groupedItems[sellerId]!.add(doc);
 
-            if (selectedItems.contains(doc.id)) {
-              double price = double.tryParse(data['price'].toString()) ?? 0.0;
-              double originalPrice = double.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : price.toString()) ?? price;
-              int qty = int.tryParse(data['quantity'].toString()) ?? 1;
-              
-              grandTotalTaka += (price * qty);
-              totalSelectedCount += qty;
-              if (originalPrice > price) {
-                totalSaved += ((originalPrice - price) * qty);
+              if (selectedItems.contains(doc.id)) {
+                double price = double.tryParse(data['price'].toString()) ?? 0.0;
+                double originalPrice = double.tryParse(data.containsKey('original_price') ? data['original_price'].toString() : price.toString()) ?? price;
+                int qty = int.tryParse(data['quantity'].toString()) ?? 1;
+                
+                grandTotalTaka += (price * qty);
+                totalSelectedCount += qty;
+                if (originalPrice > price) {
+                  totalSaved += ((originalPrice - price) * qty);
+                }
               }
             }
           }
@@ -267,176 +273,185 @@ class _CartPageState extends State<CartPage> {
           return Column(
             children:[
               Expanded(
-                child: ListView(
-                  children:[
-                    ...groupedItems.entries.map((entry) {
-                      String sellerId = entry.key;
-                      List<QueryDocumentSnapshot> items = entry.value;
-                      bool isShopSelected = shopItemsAllSelected(items);
+                child: isCartEmpty 
+                  // 🔴 কার্ট খালি থাকলে এই সুন্দর ডিজাইনটি দেখাবে
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.remove_shopping_cart_outlined, size: 80, color: Colors.grey.shade300),
+                          const SizedBox(height: 15),
+                          const Text('আপনার কার্ট খালি!', style: TextStyle(fontSize: 18, color: Colors.grey, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 5),
+                          const Text('পছন্দের প্রোডাক্ট কার্টে যুক্ত করুন', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                        ],
+                      ),
+                    )
+                  // 🟢 কার্টে প্রোডাক্ট থাকলে লিস্ট দেখাবে
+                  : ListView(
+                      children:[
+                        ...groupedItems.entries.map((entry) {
+                          String sellerId = entry.key;
+                          List<QueryDocumentSnapshot> items = entry.value;
+                          bool isShopSelected = shopItemsAllSelected(items);
 
-                      // এই দোকানের মোট টাকার হিসাব (ফ্রি শিপিং চেক করার জন্য)
-                      double shopTotal = items.fold(0.0, (sum, doc) {
-                        double p = double.tryParse(doc['price'].toString()) ?? 0.0;
-                        int q = int.tryParse(doc['quantity'].toString()) ?? 1;
-                        return sum + (p * q);
-                      });
+                          double shopTotal = items.fold(0.0, (sum, doc) {
+                            double p = double.tryParse(doc['price'].toString()) ?? 0.0;
+                            int q = int.tryParse(doc['quantity'].toString()) ?? 1;
+                            return sum + (p * q);
+                          });
 
-                      return Container(
-                        margin: const EdgeInsets.only(top: 10),
-                        color: Colors.white,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children:[
-                            // শপের হেডার
-                            FutureBuilder<DocumentSnapshot>(
-                              future: FirebaseFirestore.instance.collection('users').doc(sellerId).get(),
-                              builder: (context, shopSnapshot) {
-                                String shopName = 'Unknown Shop';
-                                String shopLogo = '';
-                                if (shopSnapshot.hasData && shopSnapshot.data!.exists) {
-                                  var shopData = shopSnapshot.data!.data() as Map<String, dynamic>;
-                                  shopName = shopData.containsKey('shop_name') && shopData['shop_name'].toString().isNotEmpty ? shopData['shop_name'] : shopData['name'] ?? 'Unknown Shop';
-                                  shopLogo = shopData['profile_image_url'] ?? '';
-                                }
+                          return Container(
+                            margin: const EdgeInsets.only(top: 10),
+                            color: Colors.white,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children:[
+                                FutureBuilder<DocumentSnapshot>(
+                                  future: FirebaseFirestore.instance.collection('users').doc(sellerId).get(),
+                                  builder: (context, shopSnapshot) {
+                                    String shopName = 'Unknown Shop';
+                                    String shopLogo = '';
+                                    if (shopSnapshot.hasData && shopSnapshot.data!.exists) {
+                                      var shopData = shopSnapshot.data!.data() as Map<String, dynamic>;
+                                      shopName = shopData.containsKey('shop_name') && shopData['shop_name'].toString().isNotEmpty ? shopData['shop_name'] : shopData['name'] ?? 'Unknown Shop';
+                                      shopLogo = shopData['profile_image_url'] ?? '';
+                                    }
 
-                                return Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                                  child: Row(
-                                    children:[
-                                      _buildShopeeCheckbox(
-                                        value: isShopSelected,
-                                        onChanged: (val) {
-                                          setState(() {
-                                            if (val == true) {
-                                              selectedShops.add(sellerId);
-                                              for (var item in items) {
-                                                selectedItems.add(item.id);
-                                              }
-                                            } else {
-                                              selectedShops.remove(sellerId);
-                                              for (var item in items) {
-                                                selectedItems.remove(item.id);
-                                              }
-                                            }
-                                          });
-                                        }
-                                      ),
-                                      CircleAvatar(radius: 12, backgroundColor: Colors.grey[200], backgroundImage: shopLogo.isNotEmpty ? NetworkImage(shopLogo) : null, child: shopLogo.isEmpty ? const Icon(Icons.storefront, size: 14, color: Colors.grey) : null),
-                                      const SizedBox(width: 8),
-                                      Expanded(child: Text('$shopName >', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))),
-                                    ],
-                                  ),
-                                );
-                              }
-                            ),
-                            const Divider(height: 1, thickness: 1, color: Color(0xFFEEEEEE)),
-                            
-                            // অ্যাডমিন কন্ট্রোলড ফ্রি শিপিং ব্যানার
-                            if (freeShippingThreshold > 0)
-                              Container(
-                                margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(color: const Color(0xFFF1FDFB), borderRadius: BorderRadius.circular(4)),
-                                child: Row(
-                                  children:[
-                                    Icon(Icons.local_shipping, color: shopeeGreen, size: 18),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                    return Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+                                      child: Row(
                                         children:[
-                                          Text(
-                                            shopTotal >= freeShippingThreshold 
-                                              ? "You've unlocked Free Shipping!" 
-                                              : "Add ৳${(freeShippingThreshold - shopTotal).toStringAsFixed(0)} more to get Free Shipping!",
-                                            style: const TextStyle(color: Colors.black87, fontSize: 12),
+                                          _buildShopeeCheckbox(
+                                            value: isShopSelected,
+                                            onChanged: (val) {
+                                              setState(() {
+                                                if (val == true) {
+                                                  selectedShops.add(sellerId);
+                                                  for (var item in items) {
+                                                    selectedItems.add(item.id);
+                                                  }
+                                                } else {
+                                                  selectedShops.remove(sellerId);
+                                                  for (var item in items) {
+                                                    selectedItems.remove(item.id);
+                                                  }
+                                                }
+                                              });
+                                            }
                                           ),
-                                          const SizedBox(height: 4),
-                                          Container(
-                                            height: 3, width: double.infinity, color: Colors.grey.shade200, alignment: Alignment.centerLeft, 
-                                            child: FractionallySizedBox(widthFactor: (shopTotal / freeShippingThreshold).clamp(0.0, 1.0), child: Container(color: shopeeGreen))
-                                          ),
+                                          CircleAvatar(radius: 12, backgroundColor: Colors.grey[200], backgroundImage: shopLogo.isNotEmpty ? NetworkImage(shopLogo) : null, child: shopLogo.isEmpty ? const Icon(Icons.storefront, size: 14, color: Colors.grey) : null),
+                                          const SizedBox(width: 8),
+                                          Expanded(child: Text('$shopName >', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))),
                                         ],
                                       ),
-                                    ),
-                                  ],
+                                    );
+                                  }
                                 ),
-                              ),
-
-                            // আইটেম লিস্ট
-                            ...items.map((cartItem) {
-                              Map<String, dynamic> data = cartItem.data() as Map<String, dynamic>;
-                              String imageUrl = data['image_url'] ?? '';
-                              bool isSelected = selectedItems.contains(cartItem.id);
-
-                              return Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children:[
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 20),
-                                      child: _buildShopeeCheckbox(
-                                        value: isSelected,
-                                        onChanged: (val) {
-                                          setState(() {
-                                            val == true ? selectedItems.add(cartItem.id) : selectedItems.remove(cartItem.id);
-                                          });
-                                        }
-                                      ),
-                                    ),
-                                    Container(height: 85, width: 85, decoration: BoxDecoration(color: Colors.yellow[100], borderRadius: BorderRadius.circular(4), border: Border.all(color: Colors.grey.shade300)), child: imageUrl.isNotEmpty ? Image.network(imageUrl, fit: BoxFit.cover) : const Center(child: Icon(Icons.image))),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children:[
-                                          Row(
+                                const Divider(height: 1, thickness: 1, color: Color(0xFFEEEEEE)),
+                                
+                                if (freeShippingThreshold > 0)
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(color: const Color(0xFFF1FDFB), borderRadius: BorderRadius.circular(4)),
+                                    child: Row(
+                                      children:[
+                                        Icon(Icons.local_shipping, color: shopeeGreen, size: 18),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
                                             crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              Expanded(child: Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontSize: 13, height: 1.2), maxLines: 2, overflow: TextOverflow.ellipsis)),
-                                              // পার্সোনাল ডিলিট বাটন
-                                              InkWell(
-                                                onTap: () => FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(cartItem.id).delete(),
-                                                child: const Padding(padding: EdgeInsets.only(left: 8.0), child: Icon(Icons.close, size: 18, color: Colors.grey)),
-                                              )
+                                            children:[
+                                              Text(
+                                                shopTotal >= freeShippingThreshold 
+                                                  ? "You've unlocked Free Shipping!" 
+                                                  : "Add ৳${(freeShippingThreshold - shopTotal).toStringAsFixed(0)} more to get Free Shipping!",
+                                                style: const TextStyle(color: Colors.black87, fontSize: 12),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Container(
+                                                height: 3, width: double.infinity, color: Colors.grey.shade200, alignment: Alignment.centerLeft, 
+                                                child: FractionallySizedBox(widthFactor: (shopTotal / freeShippingThreshold).clamp(0.0, 1.0), child: Container(color: shopeeGreen))
+                                              ),
                                             ],
                                           ),
-                                          const SizedBox(height: 5),
-                                          if (data['selected_color']?.toString().isNotEmpty == true || data['selected_size']?.toString().isNotEmpty == true)
-                                            Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(2)), child: Text('${data['selected_color']} ${data['selected_size']}'.trim(), style: const TextStyle(fontSize: 11, color: Colors.black54))),
-                                          const SizedBox(height: 8),
-                                          Row(
-                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+
+                                ...items.map((cartItem) {
+                                  Map<String, dynamic> data = cartItem.data() as Map<String, dynamic>;
+                                  String imageUrl = data['image_url'] ?? '';
+                                  bool isSelected = selectedItems.contains(cartItem.id);
+
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                    child: Row(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children:[
+                                        Padding(
+                                          padding: const EdgeInsets.only(top: 20),
+                                          child: _buildShopeeCheckbox(
+                                            value: isSelected,
+                                            onChanged: (val) {
+                                              setState(() {
+                                                val == true ? selectedItems.add(cartItem.id) : selectedItems.remove(cartItem.id);
+                                              });
+                                            }
+                                          ),
+                                        ),
+                                        Container(height: 85, width: 85, decoration: BoxDecoration(color: Colors.yellow[100], borderRadius: BorderRadius.circular(4), border: Border.all(color: Colors.grey.shade300)), child: imageUrl.isNotEmpty ? Image.network(imageUrl, fit: BoxFit.cover) : const Center(child: Icon(Icons.image))),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
                                             children:[
-                                              Text('৳${data['price']}', style: TextStyle(color: shopeeOrange, fontWeight: FontWeight.bold, fontSize: 16)),
                                               Row(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Expanded(child: Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontSize: 13, height: 1.2), maxLines: 2, overflow: TextOverflow.ellipsis)),
+                                                  InkWell(
+                                                    onTap: () => FirebaseFirestore.instance.collection('users').doc(user.uid).collection('cart').doc(cartItem.id).delete(),
+                                                    child: const Padding(padding: EdgeInsets.only(left: 8.0), child: Icon(Icons.close, size: 18, color: Colors.grey)),
+                                                  )
+                                                ],
+                                              ),
+                                              const SizedBox(height: 5),
+                                              if (data['selected_color']?.toString().isNotEmpty == true || data['selected_size']?.toString().isNotEmpty == true)
+                                                Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(2)), child: Text('${data['selected_color']} ${data['selected_size']}'.trim(), style: const TextStyle(fontSize: 11, color: Colors.black54))),
+                                              const SizedBox(height: 8),
+                                              Row(
+                                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                                 children:[
-                                                  InkWell(onTap: () { if (data['quantity'] > 1) cartItem.reference.update({'quantity': FieldValue.increment(-1)}); }, child: Container(width: 25, height: 25, decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300)), child: const Icon(Icons.remove, size: 14, color: Colors.black54))),
-                                                  Container(width: 35, height: 25, decoration: BoxDecoration(border: Border(top: BorderSide(color: Colors.grey.shade300), bottom: BorderSide(color: Colors.grey.shade300))), alignment: Alignment.center, child: Text('${data['quantity']}', style: const TextStyle(fontSize: 13))),
-                                                  InkWell(onTap: () => cartItem.reference.update({'quantity': FieldValue.increment(1)}), child: Container(width: 25, height: 25, decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300)), child: const Icon(Icons.add, size: 14, color: Colors.black54))),
+                                                  Text('৳${data['price']}', style: TextStyle(color: shopeeOrange, fontWeight: FontWeight.bold, fontSize: 16)),
+                                                  Row(
+                                                    children:[
+                                                      InkWell(onTap: () { if (data['quantity'] > 1) cartItem.reference.update({'quantity': FieldValue.increment(-1)}); }, child: Container(width: 25, height: 25, decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300)), child: const Icon(Icons.remove, size: 14, color: Colors.black54))),
+                                                      Container(width: 35, height: 25, decoration: BoxDecoration(border: Border(top: BorderSide(color: Colors.grey.shade300), bottom: BorderSide(color: Colors.grey.shade300))), alignment: Alignment.center, child: Text('${data['quantity']}', style: const TextStyle(fontSize: 13))),
+                                                      InkWell(onTap: () => cartItem.reference.update({'quantity': FieldValue.increment(1)}), child: Container(width: 25, height: 25, decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300)), child: const Icon(Icons.add, size: 14, color: Colors.black54))),
+                                                    ],
+                                                  )
                                                 ],
                                               )
                                             ],
-                                          )
-                                        ],
-                                      ),
-                                    )
-                                  ],
-                                ),
-                              );
-                            }),
-                            
-                          ],
-                        ),
-                      );
-                    }),
-                    const SizedBox(height: 20),
-                  ],
-                ),
+                                          ),
+                                        )
+                                      ],
+                                    ),
+                                  );
+                                }),
+                              ],
+                            ),
+                          );
+                        }),
+                        const SizedBox(height: 20),
+                      ],
+                    ),
               ),
 
-              // --- Bottom Navigation Order Bar ---
+              // 🔴 এই বটম বারটি এখন সবসময় নিচে ফিক্সড থাকবে (কার্ট খালি থাকলেও)
               Container(
                 decoration: BoxDecoration(color: Colors.white, boxShadow:[BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, -5))]),
                 child: Row(
@@ -447,7 +462,7 @@ class _CartPageState extends State<CartPage> {
                         children:[
                           _buildShopeeCheckbox(
                             value: selectedItems.length == snapshot.data!.docs.length && snapshot.data!.docs.isNotEmpty,
-                            onChanged: (val) {
+                            onChanged: isCartEmpty ? (val){} : (val) {
                               setState(() {
                                 if (val == true) {
                                   for (var doc in snapshot.data!.docs) {
@@ -483,13 +498,12 @@ class _CartPageState extends State<CartPage> {
                     const SizedBox(width: 10),
                     InkWell(
                       onTap: totalSelectedCount > 0 ? () {
-                         // এখানে Checkout পেজে পাঠানোর লজিক, সাথে ফ্রি শিপিং ডাটা পাস করা হচ্ছে
                          Navigator.push(context, MaterialPageRoute(builder: (context) => CheckoutPage(grandTotal: grandTotalTaka.toInt(), selectedItemIds: selectedItems.toList(), freeShippingThreshold: freeShippingThreshold)));
                       } : null,
                       child: Container(
                         height: 55, width: 120,
                         alignment: Alignment.center,
-                        color: totalSelectedCount > 0 ? shopeeOrange : Colors.grey,
+                        color: totalSelectedCount > 0 ? shopeeOrange : Colors.grey, // 🔴 কার্ট খালি থাকলে বাটনটি অটোমেটিক গ্রে (Disable) হয়ে থাকবে
                         child: Text('Check Out ($totalSelectedCount)', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
                       ),
                     )
@@ -812,16 +826,17 @@ class _CheckoutPageState extends State<CheckoutPage> {
         await FirebaseFirestore.instance.collection('users').doc(user.uid).update({'d_coins': 0});
       }
 
-      // অ্যাডমিনকে নোটিফিকেশন পাঠানো (শুধু এডমিন টপিকে যাবে)
-      if (initialStatus == 'Pending') {
-        await FirebaseFirestore.instance.collection('notifications').add({
-          'title': 'New Order Received! 🛒',
-          'message': '${userAddress!['shipping_name']} একটি নতুন অর্ডার করেছেন।',
-          'topic': 'admins', // এটি শুধু এডমিনরা পাবে
-          'sent_at': FieldValue.serverTimestamp(),
-          'data': {'screen': 'admin_orders'} 
-        });
-      } else {
+        // অ্যাডমিনকে নোটিফিকেশন পাঠানো (New Order Alarm)
+        if (initialStatus == 'Pending') {
+          await FirebaseFirestore.instance.collection('notifications').add({
+            'title': 'New Order Received! 🛒',
+            'message': '${userAddress!['shipping_name']} একটি নতুন অর্ডার করেছেন।',
+            'topic': 'admins', 
+            'type': 'new_order', // 🔴 এটি দেওয়ার কারণেই এডমিনের রিংটোন বাজবে!
+            'data': {'screen': 'admin_orders'},
+            'sent_at': FieldValue.serverTimestamp(),
+          });
+        } else {
         await FirebaseFirestore.instance.collection('notifications').add({
           'title': 'New bKash Order Paid! 💰',
           'message': 'একটি বিকাশ পেমেন্ট অর্ডার রিসিভ হয়েছে (Auto Approved)।',
@@ -1501,7 +1516,18 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> with SingleTick
               );
             },
           ),
-          IconButton(icon: const Icon(Icons.share, color: Colors.black), onPressed: () {}), 
+          // 🔴 শেয়ার বাটন (IMO, FB, WhatsApp সব অপশন আসবে)
+          IconButton(
+            icon: const Icon(Icons.share, color: Colors.black), 
+            onPressed: () {
+              String shareText = 'D Shop এ অসাধারণ একটি প্রোডাক্ট দেখলাম!\n\n'
+                               'পণ্য: ${data['product_name']}\n'
+                               'দাম: ৳$finalCurrentPrice\n'
+                               'কোড: $productCode\n\n'
+                               'অ্যাপটি ডাউনলোড করে এখনই অর্ডার করুন!';
+              Share.share(shareText);
+            }
+          ), 
           
           // =====================================
           // [NEW] Cart Icon with Shake Animation
@@ -1561,31 +1587,30 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> with SingleTick
                                   const Spacer(),
                                   InkWell(onTap: () async { final Uri url = Uri.parse('tel:$adminPhoneNumber'); if (await canLaunchUrl(url)) await launchUrl(url); }, child: Container(width: 32, height: 32, decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle), child: const Icon(Icons.call, size: 18, color: Colors.white))),
                                   const SizedBox(width: 10),
-                                  InkWell(
+                                  // 🔴 হোয়াটসঅ্যাপ ফিক্সড লজিক
+                                InkWell(
                                   onTap: () async {
-                                    String msg =
-                                        "হ্যালো, আমি এই প্রোডাক্টটি অর্ডার করতে চাই।\nপ্রোডাক্ট কোড: $productCode\nনাম: ${data['product_name']}";
+                                    String msg = "হ্যালো, আমি এই প্রোডাক্টটি অর্ডার করতে চাই।\nপ্রোডাক্ট কোড: $productCode\nনাম: ${data['product_name']}";
+                                    
+                                    // নাম্বার থেকে স্পেস বা + সরিয়ে শুধু 88 দিয়ে শুরু করা হচ্ছে
+                                    String cleanPhone = adminPhoneNumber.replaceAll('+', '').replaceAll('-', '').replaceAll(' ', '');
+                                    if (cleanPhone.startsWith('0')) {
+                                      cleanPhone = '88$cleanPhone';
+                                    }
 
-                                    String formattedPhone = adminPhoneNumber.startsWith('0')
-                                        ? '+88$adminPhoneNumber'
-                                        : adminPhoneNumber;
-
-                                    final Uri waUrl = Uri.parse(
-                                        "https://wa.me/${formattedPhone.replaceAll('+', '')}?text=${Uri.encodeComponent(msg)}");
+                                    final Uri waUrl = Uri.parse("https://wa.me/$cleanPhone?text=${Uri.encodeComponent(msg)}");
 
                                     if (await canLaunchUrl(waUrl)) {
                                       await launchUrl(waUrl, mode: LaunchMode.externalApplication);
+                                    } else {
+                                      if(context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('WhatsApp ওপেন করা যাচ্ছে না!')));
                                     }
                                   },
                                   child: ClipOval(
-                                    child: Image.asset(
-                                      'assets/icons/whatsapp.png', // ✅ আপনার ফোল্ডার path
-                                      width: 43,
-                                      height: 43,
-                                      fit: BoxFit.cover,
-                                    ),
+                                    child: Image.asset('assets/icons/whatsapp.png', width: 43, height: 43, fit: BoxFit.cover),
                                   ),
                                 ),
+                                
 
                                 const SizedBox(width: 10),
 
@@ -2086,27 +2111,69 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children:[
                         if (searchQuery.isEmpty && selectedCategoryFilter.isEmpty) ...[
-                          StreamBuilder(
-                            stream: FirebaseFirestore.instance.collection('banners').snapshots(), 
-                            builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
-                              if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
-                                var activeDocs = snapshot.data!.docs.where((doc) => (doc.data() as Map<String, dynamic>)['isActive'] ?? true).toList();
-                                if (activeDocs.isEmpty) return _buildDefaultBanner(); 
-
-                                return SizedBox(
-                                  height: 160,
-                                  child: PageView.builder(
-                                    controller: _bannerController,
-                                    itemBuilder: (context, index) {
-                                      int realIndex = index % activeDocs.length; 
-                                      return Container(margin: const EdgeInsets.all(15), decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), image: DecorationImage(image: NetworkImage(activeDocs[realIndex]['image_url']), fit: BoxFit.cover)));
-                                    },
-                                    onPageChanged: (index) => _currentBannerPage = index,
-                                  ),
-                                );
+                          StreamBuilder<DocumentSnapshot>(
+                            stream: FirebaseFirestore.instance.collection('app_config').doc('default_banner').snapshots(),
+                            builder: (context, configSnap) {
+                              String defaultBgUrl = '';
+                              if (configSnap.hasData && configSnap.data!.exists) {
+                                defaultBgUrl = (configSnap.data!.data() as Map<String, dynamic>)['image_url'] ?? '';
                               }
-                              return _buildDefaultBanner(); 
-                            },
+
+                              return StreamBuilder(
+                                stream: FirebaseFirestore.instance.collection('banners').snapshots(), 
+                                builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+                                  if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
+                                    var activeDocs = snapshot.data!.docs.where((doc) => (doc.data() as Map<String, dynamic>)['isActive'] ?? true).toList();
+                                    if (activeDocs.isEmpty) return _buildDefaultBanner(); 
+
+                                    return SizedBox(
+                                      height: 160,
+                                      child: Stack(
+                                        children: [
+                                          // 🟢 লেয়ার ১: এডমিনের সেট করা ব্যাকগ্রাউন্ড ইমেজ (সাদা স্ক্রিন ঢাকবে)
+                                          Container(
+                                            margin: const EdgeInsets.all(15),
+                                            width: double.infinity,
+                                            decoration: BoxDecoration(
+                                              color: Colors.grey.shade200, // ছবি না থাকলে হালকা গ্রে দেখাবে
+                                              borderRadius: BorderRadius.circular(10),
+                                              image: defaultBgUrl.isNotEmpty ? DecorationImage(image: NetworkImage(defaultBgUrl), fit: BoxFit.cover) : null,
+                                            ),
+                                            child: defaultBgUrl.isEmpty ? const Center(child: Icon(Icons.image, color: Colors.grey, size: 40)) : null,
+                                          ),
+
+                                          // 🟢 লেয়ার ২: আসল ব্যানারগুলো (ডাউনলোড হতে হতে নিচের ছবিটা দেখা যাবে)
+                                          PageView.builder(
+                                            controller: _bannerController,
+                                            itemBuilder: (context, index) {
+                                              int realIndex = index % activeDocs.length; 
+                                              return Container(
+                                                margin: const EdgeInsets.all(15),
+                                                child: ClipRRect(
+                                                  borderRadius: BorderRadius.circular(10),
+                                                  child: Image.network(
+                                                    activeDocs[realIndex]['image_url'],
+                                                    fit: BoxFit.cover,
+                                                    width: double.infinity,
+                                                    loadingBuilder: (context, child, loadingProgress) {
+                                                      // যতক্ষণ লোড হবে, এটি স্বচ্ছ (SizedBox) থাকবে, তাই নিচের ব্যাকগ্রাউন্ড দেখা যাবে!
+                                                      if (loadingProgress == null) return child;
+                                                      return const SizedBox(); 
+                                                    },
+                                                  )
+                                                ),
+                                              );
+                                            },
+                                            onPageChanged: (index) => _currentBannerPage = index,
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }
+                                  return _buildDefaultBanner(); 
+                                },
+                              );
+                            }
                           ),
 
                           StreamBuilder(
@@ -3191,7 +3258,6 @@ class _OrderHistoryPageState extends State<OrderHistoryPage> {
               ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
                 onPressed: () async {
-                  if (commentCtrl.text.isEmpty) return;
                   Navigator.pop(context); // Close dialog
                   
                   showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
@@ -3208,7 +3274,7 @@ class _OrderHistoryPageState extends State<OrderHistoryPage> {
                     imageUrl = await ref.getDownloadURL();
                   }
 
-                  // ডাটাবেসে রিভিউ সেভ করা এবং অর্ডারের স্ট্যাটাস আপডেট করা
+                  // ডাটাবেসে রিভিউ সেভ করা
                   await FirebaseFirestore.instance.collection('orders').doc(orderId).update({
                     'is_reviewed': true,
                     'rating': selectedRating,
@@ -3216,16 +3282,18 @@ class _OrderHistoryPageState extends State<OrderHistoryPage> {
                     'review_image_url': imageUrl,
                   });
 
-                  // কাস্টমারকে D-Coins দেওয়া
-                  int rewardCoins = reviewImage != null ? 50 : 20; // ছবি দিলে ৫০, নাহলে ২০
-                  await FirebaseFirestore.instance.collection('users').doc(userId).update({
+                  // কাস্টমারকে D-Coins দেওয়া (SetOptions merge ব্যবহার করা হলো যাতে ক্র্যাশ না করে)
+                  int rewardCoins = reviewImage != null ? 50 : 20; 
+                  await FirebaseFirestore.instance.collection('users').doc(userId).set({
                     'd_coins': FieldValue.increment(rewardCoins)
-                  });
+                  }, SetOptions(merge: true));
 
+                  // অ্যাডমিনকে নোটিফিকেশন পাঠানো (ডিফল্ট সাউন্ড বাজবে)
                   await FirebaseFirestore.instance.collection('notifications').add({
-                    'title': 'New Review! ⭐',
+                    'title': 'New Review Submitted! ⭐',
                     'message': 'অর্ডার #${orderId.substring(0, 6)} এর জন্য কাস্টমার রেটিং দিয়েছেন: $selectedRating Star.',
                     'topic': 'admins',
+                    'type': 'default', // সাধারণ নোটিফিকেশন
                     'sent_at': FieldValue.serverTimestamp(),
                   });
 
@@ -3233,7 +3301,7 @@ class _OrderHistoryPageState extends State<OrderHistoryPage> {
                     Navigator.pop(context); // Close Loading
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Review Submitted! You earned $rewardCoins D-Coins 🪙'), backgroundColor: Colors.green));
                   }
-                }, 
+                },
                 child: const Text('Submit Review', style: TextStyle(color: Colors.white))
               )
             ],
@@ -3640,15 +3708,78 @@ class WishlistPage extends StatelessWidget {
 }
 
 // ==========================================
-// ইউনিভার্সাল নোটিফিকেশন পেজ (Customer, Seller, Rider সবার জন্য)
+// ইউনিভার্সাল নোটিফিকেশন পেজ (Smart UI, Grouped Dates, Auto-Cleanup)
 // ==========================================
-class CustomerNotificationPage extends StatelessWidget {
+class CustomerNotificationPage extends StatefulWidget {
   const CustomerNotificationPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    User? currentUser = FirebaseAuth.instance.currentUser;
+  State<CustomerNotificationPage> createState() => _CustomerNotificationPageState();
+}
 
+class _CustomerNotificationPageState extends State<CustomerNotificationPage> {
+  User? currentUser = FirebaseAuth.instance.currentUser;
+
+  @override
+  void initState() {
+    super.initState();
+    _cleanupOldNotifications(); // পেজ ওপেন হলেই ৩০ দিনের পুরোনো নোটিফিকেশন মুছে ফেলবে
+  }
+
+  // 🔴 ৩০ দিনের পুরোনো পার্সোনাল নোটিফিকেশন ডিলিট করার স্মার্ট ফাংশন
+  Future<void> _cleanupOldNotifications() async {
+    if (currentUser == null) return;
+    try {
+      DateTime thirtyDaysAgo = DateTime.now().subtract(const Duration(days: 30));
+      
+      var oldNotifs = await FirebaseFirestore.instance
+          .collection('notifications')
+          .where('target_user_id', isEqualTo: currentUser!.uid)
+          .where('sent_at', isLessThan: thirtyDaysAgo)
+          .get();
+
+      WriteBatch batch = FirebaseFirestore.instance.batch();
+      for (var doc in oldNotifs.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+    } catch (e) {
+      debugPrint("Cleanup Error: $e");
+    }
+  }
+
+  // 🔴 টাইটেল পড়ে কালার এবং আইকন ডিসাইড করার ফাংশন
+  Map<String, dynamic> _getNotificationStyle(String title) {
+    String t = title.toLowerCase();
+    if (t.contains('cancel') || t.contains('fail')) {
+      return {'color': Colors.red, 'icon': Icons.cancel};
+    } else if (t.contains('confirm') || t.contains('success') || t.contains('deliver')) {
+      return {'color': Colors.green, 'icon': Icons.check_circle};
+    } else if (t.contains('rider') || t.contains('pick') || t.contains('coming')) {
+      return {'color': Colors.blue, 'icon': Icons.motorcycle};
+    } else if (t.contains('review') || t.contains('star')) {
+      return {'color': Colors.amber.shade700, 'icon': Icons.star};
+    }
+    // ডিফল্ট স্টাইল (অরেঞ্জ)
+    return {'color': Colors.deepOrange, 'icon': Icons.notifications_active};
+  }
+
+  // 🔴 তারিখের হেডার (Today, Yesterday, 26 Mar) বানানোর ফাংশন
+  String _getDateHeader(DateTime date) {
+    DateTime now = DateTime.now();
+    DateTime today = DateTime(now.year, now.month, now.day);
+    DateTime yesterday = today.subtract(const Duration(days: 1));
+    DateTime notifDate = DateTime(date.year, date.month, date.day);
+
+    if (notifDate == today) return 'Today';
+    if (notifDate == yesterday) return 'Yesterday';
+
+    List<String> months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${date.day} ${months[date.month - 1]}, ${date.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
       appBar: AppBar(
@@ -3661,9 +3792,7 @@ class CustomerNotificationPage extends StatelessWidget {
         ),
       ),
       body: StreamBuilder<QuerySnapshot>(
-        // [FIXED] শুধুমাত্র এই ইউজারের নোটিফিকেশন এবং ব্রডকাস্ট (all_users) মেসেজগুলো আনা হচ্ছে
-        stream: FirebaseFirestore.instance.collection('notifications')
-            .snapshots(), // Local filtering-এর জন্য সব স্ন্যাপশট নিয়ে ডার্টে ফিল্টার করব
+        stream: FirebaseFirestore.instance.collection('notifications').snapshots(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -3672,21 +3801,17 @@ class CustomerNotificationPage extends StatelessWidget {
             return _buildEmptyNotification();
           }
 
-          //[NEW] ডার্টের মাধ্যমে ফিল্টারিং (Firebase Index Error এড়াতে)
           var allNotifications = snapshot.data!.docs.where((doc) {
             Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
             String? targetUser = data['target_user_id'];
             String? targetRole = data['target_role'];
             String? type = data['type'];
 
-            // কন্ডিশন: যদি নোটিফিকেশনটি সরাসরি এই ইউজারকে করা হয়, অথবা ব্রডকাস্ট হয়
             bool isForMe = (targetUser == currentUser?.uid);
             bool isBroadcast = (targetRole == 'all_users' || type == 'all_users');
-            
             return isForMe || isBroadcast;
           }).toList();
 
-          // [NEW] লেটেস্ট নোটিফিকেশন আগে দেখানোর জন্য সর্টিং
           allNotifications.sort((a, b) {
             Timestamp? tA = (a.data() as Map<String, dynamic>)['sent_at'] as Timestamp?;
             Timestamp? tB = (b.data() as Map<String, dynamic>)['sent_at'] as Timestamp?;
@@ -3705,32 +3830,104 @@ class CustomerNotificationPage extends StatelessWidget {
               var doc = allNotifications[index];
               Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
               
-              String timeString = "Just now";
+              DateTime? notifDate;
               if (data['sent_at'] != null) {
-                DateTime date = (data['sent_at'] as Timestamp).toDate();
-                timeString = "${date.day}/${date.month}/${date.year} at ${date.hour > 12 ? date.hour - 12 : date.hour}:${date.minute.toString().padLeft(2, '0')}";
+                notifDate = (data['sent_at'] as Timestamp).toDate();
               }
 
-              return Card(
-                margin: const EdgeInsets.only(bottom: 10),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                child: ListTile(
-                  contentPadding: const EdgeInsets.all(15),
-                  leading: CircleAvatar(
-                    backgroundColor: Colors.orange.shade100,
-                    child: const Icon(Icons.notifications_active, color: Colors.deepOrange),
+              // 🔴 AM/PM সহ সুন্দর টাইম ফরম্যাট
+              String timeString = "Just now";
+              if (notifDate != null) {
+                int hour = notifDate.hour;
+                String period = hour >= 12 ? "PM" : "AM";
+                int displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
+                timeString = "$displayHour:${notifDate.minute.toString().padLeft(2, '0')} $period";
+              }
+
+              // 🔴 স্মার্ট ডেট গ্রুপিং লজিক
+              bool showDateHeader = false;
+              if (index == 0) {
+                showDateHeader = true; // প্রথম আইটেমে সব সময় ডেট দেখাবে
+              } else if (notifDate != null) {
+                Map<String, dynamic> prevData = allNotifications[index - 1].data() as Map<String, dynamic>;
+                if (prevData['sent_at'] != null) {
+                  DateTime prevDate = (prevData['sent_at'] as Timestamp).toDate();
+                  if (prevDate.year != notifDate.year || prevDate.month != notifDate.month || prevDate.day != notifDate.day) {
+                    showDateHeader = true; // আগেরটার সাথে দিন না মিললে নতুন হেডার দেখাবে
+                  }
+                }
+              }
+
+              String title = data['title'] ?? 'Notice';
+              Map<String, dynamic> style = _getNotificationStyle(title);
+              Color themeColor = style['color'];
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // 🔴 মাঝখানে ডেট হেডার (Today / Yesterday)
+                  if (showDateHeader && notifDate != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 20, bottom: 10),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(15)),
+                        child: Text(_getDateHeader(notifDate), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.black54)),
+                      ),
+                    ),
+
+                  // 🔴 কাস্টম ডিজাইন করা কার্ড
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 15, left: 2, right: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: themeColor.withOpacity(0.15), // কালার অনুযায়ী গ্লো
+                          blurRadius: 10,
+                          spreadRadius: 1,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          border: Border(left: BorderSide(color: themeColor, width: 5)),
+                        ),
+                        padding: const EdgeInsets.all(15),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(color: themeColor.withOpacity(0.1), shape: BoxShape.circle),
+                              child: Icon(style['icon'], color: themeColor, size: 24),
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.black87)),
+                                  const SizedBox(height: 5),
+                                  Text(data['message'] ?? '', style: const TextStyle(color: Colors.black54, fontSize: 13, height: 1.4)),
+                                  const SizedBox(height: 10),
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: Text(timeString, style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
-                  title: Text(data['title'] ?? 'Notice', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children:[
-                      const SizedBox(height: 5),
-                      Text(data['message'] ?? '', style: const TextStyle(color: Colors.black87)),
-                      const SizedBox(height: 10),
-                      Text(timeString, style: const TextStyle(color: Colors.grey, fontSize: 11)),
-                    ],
-                  ),
-                ),
+                ],
               );
             },
           );
@@ -3743,7 +3940,7 @@ class CustomerNotificationPage extends StatelessWidget {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
-        children:[
+        children: [
           Icon(Icons.notifications_off_outlined, size: 80, color: Colors.grey.shade300),
           const SizedBox(height: 15),
           const Text('No new notifications', style: TextStyle(color: Colors.grey, fontSize: 16)),
