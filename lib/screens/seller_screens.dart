@@ -1,33 +1,21 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:geolocator/geolocator.dart';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
-import 'package:url_launcher/url_launcher.dart'; 
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'dart:async';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-import 'dart:math' as math;
 import 'package:flutter/services.dart';
 
 // আমাদের নিজেদের ফাইলগুলোর লিংক (যাতে এক পেজ থেকে অন্য পেজে যাওয়া যায়)
-import '../main.dart';
 import 'auth_screens.dart';
 import 'customer_screens.dart';
-import 'seller_screens.dart';
-import 'admin_screens.dart';
-import 'rider_screens.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dohar_shop/notification_service.dart';
 
 

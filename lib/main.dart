@@ -1,5 +1,3 @@
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart'; // 🔴 এই ইম্পোর্ট যোগ করুন
 import 'package:firebase_core/firebase_core.dart';
@@ -8,7 +6,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'firebase_options.dart';
 import 'notification_service.dart';
-import 'screens/auth_screens.dart';
 import 'screens/customer_screens.dart';
 import 'screens/seller_screens.dart';
 import 'screens/admin_screens.dart';

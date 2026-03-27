@@ -10,6 +10,9 @@ import 'seller_screens.dart';
 import 'rider_screens.dart';
 import 'admin_screens.dart';
 import 'package:flutter/foundation.dart';
+import 'package:geocoding/geocoding.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 
 // ==========================================
 // ১. প্রফেশনাল Login Screen (Only Phone + Password)
@@ -558,7 +561,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 }
 
 // ==========================================
-// ৩. ম্যাপ থেকে লোকেশন পিক করার স্ক্রিন (সেলার/রাইডারের জন্য)
+// ৩. ম্যাপ থেকে লোকেশন পিক করার স্ক্রিন (১০০% একুরেট Google API সার্চ)
 // ==========================================
 class LocationPickerScreen extends StatefulWidget {
   const LocationPickerScreen({super.key});
@@ -570,6 +573,8 @@ class LocationPickerScreen extends StatefulWidget {
 class _LocationPickerScreenState extends State<LocationPickerScreen> {
   LatLng _currentPosition = const LatLng(23.6062, 90.1345); // দোহার
   GoogleMapController? _mapController;
+  final TextEditingController _searchController = TextEditingController();
+  bool _isSearching = false;
 
   @override
   void initState() {
@@ -594,10 +599,41 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
     }
   }
 
+  // 🔴 Google Geocoding API ব্যবহার করে ১০০% একুরেট সার্চ
+  Future<void> _searchPlace() async {
+    if (_searchController.text.trim().isEmpty) return;
+    
+    setState(() => _isSearching = true);
+    
+    try {
+      String query = Uri.encodeComponent(_searchController.text.trim());
+      // আপনার গুগল ম্যাপের API Key
+      String apiKey = "AIzaSyC6C-fHPPbo5xdDDuNhEm4wDfVci9BZI0M"; 
+      String url = "https://maps.googleapis.com/maps/api/geocode/json?address=$query&key=$apiKey";
+      
+      var response = await http.get(Uri.parse(url));
+      var data = json.decode(response.body);
+
+      if (data['status'] == 'OK' && data['results'].isNotEmpty) {
+        var location = data['results'][0]['geometry']['location'];
+        setState(() {
+          _currentPosition = LatLng(location['lat'], location['lng']);
+        });
+        _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_currentPosition, 16));
+      } else {
+        if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('জায়গাটি পাওয়া যায়নি! সঠিক নাম লিখুন।'), backgroundColor: Colors.red));
+      }
+    } catch (e) {
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ইন্টারনেট কানেকশন চেক করুন!'), backgroundColor: Colors.red));
+    } finally {
+      setState(() => _isSearching = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Pin Your Location'), backgroundColor: Colors.deepOrange),
+      appBar: AppBar(title: const Text('Pin Customer Location'), backgroundColor: Colors.deepOrange, foregroundColor: Colors.white),
       body: Stack(
         alignment: Alignment.center,
         children:[
@@ -605,13 +641,49 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
             initialCameraPosition: CameraPosition(target: _currentPosition, zoom: 15),
             onMapCreated: (GoogleMapController controller) => _mapController = controller,
             onCameraMove: (position) => _currentPosition = position.target,
-            myLocationEnabled: false,
+            myLocationEnabled: true,
+            myLocationButtonEnabled: false, 
             zoomControlsEnabled: false,
           ),
+          
           const Padding(
             padding: EdgeInsets.only(bottom: 35.0), 
             child: Icon(Icons.location_on, size: 50, color: Colors.deepOrange),
           ),
+
+          // 🔴 টপ সার্চ বার
+          Positioned(
+            top: 15, left: 15, right: 15,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 5)]),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchController,
+                      decoration: const InputDecoration(hintText: 'Search area, village or city...', border: InputBorder.none),
+                      onSubmitted: (value) => _searchPlace(),
+                    ),
+                  ),
+                  _isSearching 
+                      ? const Padding(padding: EdgeInsets.all(12.0), child: SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.deepOrange)))
+                      : IconButton(icon: const Icon(Icons.search, color: Colors.deepOrange), onPressed: _searchPlace)
+                ],
+              ),
+            ),
+          ),
+
+          // কারেন্ট লোকেশনে যাওয়ার বাটন
+          Positioned(
+            bottom: 90, right: 15,
+            child: FloatingActionButton(
+              mini: true, backgroundColor: Colors.white,
+              onPressed: _getUserCurrentLocation,
+              child: const Icon(Icons.my_location, color: Colors.blue),
+            ),
+          ),
+
           Positioned(
             bottom: 20, left: 20, right: 20,
             child: ElevatedButton(
