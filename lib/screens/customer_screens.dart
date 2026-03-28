@@ -27,6 +27,40 @@ import 'seller_screens.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../notification_service.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+
+
+
+class AppAnalytics {
+  static FirebaseAnalytics analytics = FirebaseAnalytics.instance;
+
+  // ১. প্রোডাক্ট ভিউ ট্র্যাক করা
+  static Future<void> logViewItem(String productId, String name, double price, String category) async {
+    await analytics.logViewItem(
+      currency: 'BDT',
+      value: price,
+      items:[AnalyticsEventItem(itemId: productId, itemName: name, price: price, itemCategory: category)],
+    );
+    // অ্যাডমিন ড্যাশবোর্ডের পাই-চার্টের (Pie Chart) জন্য ফায়ারস্টোরেও সেভ রাখা
+    await FirebaseFirestore.instance.collection('analytics_data').add({
+      'event': 'view_item', 'category': category, 'timestamp': FieldValue.serverTimestamp()
+    });
+  }
+
+  // ২. কার্টে অ্যাড করা ট্র্যাক করা
+  static Future<void> logAddToCart(String productId, String name, double price, int qty) async {
+    await analytics.logAddToCart(
+      currency: 'BDT',
+      value: price * qty,
+      items:[AnalyticsEventItem(itemId: productId, itemName: name, price: price, quantity: qty)],
+    );
+  }
+
+  // ৩. সার্চ ট্র্যাক করা
+  static Future<void> logSearch(String query) async {
+    await analytics.logSearch(searchTerm: query);
+  }
+}
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = 
     FlutterLocalNotificationsPlugin();
@@ -159,23 +193,59 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: _pages[_selectedIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        type: BottomNavigationBarType.fixed,
-        currentIndex: _selectedIndex,
-        selectedItemColor: Colors.deepOrange,
-        unselectedItemColor: Colors.grey[600],
-        showUnselectedLabels: true,
-        selectedFontSize: 12,
-        unselectedFontSize: 12,
-        onTap: _onItemTapped,
-        items: const[
-          BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: 'Home'),
-          BottomNavigationBarItem(icon: Icon(Icons.grid_view_rounded), label: 'Categories'),
-          BottomNavigationBarItem(icon: Icon(Icons.shopping_cart_outlined), label: 'Cart'),
-          BottomNavigationBarItem(icon: Icon(Icons.person_outline), label: 'Profile'),
-        ],
+    // WillPopScope দিয়ে ইউজারের ব্যাক বাটন কন্ট্রোল করা হচ্ছে
+    return WillPopScope(
+      onWillPop: () async {
+        // ১. যদি ইউজার হোম পেজে না থাকে, তবে ব্যাক চাপলে আগে হোমে আসবে
+        if (_selectedIndex != 0) {
+          setState(() {
+            _selectedIndex = 0;
+          });
+          return false; // অ্যাপ থেকে বের হবে না
+        }
+
+        // ২. যদি হোমে থাকে, তবে বের হওয়ার ডায়ালগ দেখাবে
+        bool exitApp = await showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('অ্যাপ বন্ধ করতে চান?', style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+            content: const Text('আপনি কি নিশ্চিত যে আপনি অ্যাপ থেকে বের হতে চান?'),
+            actions:[
+              TextButton(
+                onPressed: () => Navigator.pop(context, false), // 'না' চাপলে false রিটার্ন করবে
+                child: const Text('না', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                onPressed: () => Navigator.pop(context, true), // 'হ্যাঁ' চাপলে true রিটার্ন করবে
+                child: const Text('হ্যাঁ', style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          ),
+        ) ?? false; // ডায়ালগের বাইরে ক্লিক করলে ডিফল্টভাবে false ধরবে
+
+        return exitApp; // true হলে বের হবে, false হলে বের হবে না
+      },
+      
+      // আপনার আগের Scaffold এর কোড হুবহু ভেতরে থাকবে
+      child: Scaffold(
+        body: _pages[_selectedIndex],
+        bottomNavigationBar: BottomNavigationBar(
+          type: BottomNavigationBarType.fixed,
+          currentIndex: _selectedIndex,
+          selectedItemColor: Colors.deepOrange,
+          unselectedItemColor: Colors.grey[600],
+          showUnselectedLabels: true,
+          selectedFontSize: 12,
+          unselectedFontSize: 12,
+          onTap: _onItemTapped,
+          items: const[
+            BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: 'Home'),
+            BottomNavigationBarItem(icon: Icon(Icons.grid_view_rounded), label: 'Categories'),
+            BottomNavigationBarItem(icon: Icon(Icons.shopping_cart_outlined), label: 'Cart'),
+            BottomNavigationBarItem(icon: Icon(Icons.person_outline), label: 'Profile'),
+          ],
+        ),
       ),
     );
   }
@@ -1353,6 +1423,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> with SingleTick
         'added_at': FieldValue.serverTimestamp(),
       });
       cartDocId = newDoc.id;
+      AppAnalytics.logAddToCart(widget.product.id, pData['product_name'], finalPrice.toDouble(), currentQty);
     }
 
     if (!mounted) return;
@@ -2096,9 +2167,10 @@ class _ShopeeHomeState extends State<ShopeeHome> {
                     child: TextField(
                       controller: searchController,
                       onChanged: (value) {
-                         setState(() => searchQuery = value.toLowerCase().trim());
-                         //[NEW] ২ ক্যারেক্টারের বেশি হলে অ্যানালিটিক্সে সেভ করবে
-                         if (searchQuery.length > 2) _logUserActivity('search', searchQuery);
+                        setState(() => searchQuery = value.toLowerCase().trim());
+                        if (searchQuery.length > 2) {
+                          AppAnalytics.logSearch(searchQuery); // 👈 এখানে বসান
+                        }
                       },
                       decoration: InputDecoration(hintText: 'Search for products...', prefixIcon: const Icon(Icons.search, color: Colors.grey), suffixIcon: searchQuery.isNotEmpty ? IconButton(icon: const Icon(Icons.clear, color: Colors.grey), onPressed: () { searchController.clear(); setState(() => searchQuery = ''); }) : const Icon(Icons.qr_code_scanner, color: Colors.grey), border: InputBorder.none, contentPadding: const EdgeInsets.only(top: 10))
                     )
@@ -2326,8 +2398,8 @@ class _ShopeeHomeState extends State<ShopeeHome> {
 
     return InkWell(
       onTap: () {
-         _logUserActivity('view_product', data['product_name'] ?? product.id); //[NEW LOGIC]
-         Navigator.push(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: product)));
+        AppAnalytics.logViewItem(product.id, data['product_name'], double.tryParse(data['price'].toString()) ?? 0, data['category']); // 👈 এখানে বসান
+        Navigator.push(context, MaterialPageRoute(builder: (context) => ProductDetailsPage(product: product)));
       },
       child: Container(width: isHorizontal ? 140 : null, margin: isHorizontal ? const EdgeInsets.only(right: 10) : EdgeInsets.zero, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Expanded(child: Stack(children:[Container(width: double.infinity, decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: const BorderRadius.vertical(top: Radius.circular(10))), child: firstImage.isNotEmpty ? ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(10)), child: Image.network(firstImage, fit: BoxFit.cover)) : const Center(child: Icon(Icons.image, size: 50, color: Colors.grey))), if (discountPercent > 0) Positioned(top: 0, right: 0, child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: const BoxDecoration(color: Colors.red, borderRadius: BorderRadius.only(topRight: Radius.circular(10), bottomLeft: Radius.circular(10))), child: Text('-$discountPercent%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))))])), Padding(padding: const EdgeInsets.all(10.0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text(data['product_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis), const SizedBox(height: 5), Row(crossAxisAlignment: CrossAxisAlignment.end, children:[Text('৳$displayPrice', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 14)), const SizedBox(width: 5), if (discountPercent > 0) Text('৳$originalPrice', style: const TextStyle(color: Colors.grey, decoration: TextDecoration.lineThrough, fontSize: 10))])]))])),
     );
@@ -2507,40 +2579,6 @@ class _UserDashboardState extends State<UserDashboard> {
               ]
             ),
           ),
-          
-          // =====================================
-          // সেলার মুডে ফিরে যাওয়ার অপশন
-          // =====================================
-          if (_userRole == 'seller')
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-              child: InkWell(
-                onTap: () {
-                  Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
-                },
-                child: Container(
-                  padding: const EdgeInsets.all(15),
-                  decoration: BoxDecoration(color: Colors.teal.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.teal)),
-                  child: Row(
-                    children: const[
-                      Icon(Icons.storefront, color: Colors.teal, size: 28),
-                      SizedBox(width: 15),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children:[
-                            Text('Return to Seller Mode', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.teal)),
-                            Text('আপনার দোকানে ফিরে যান', style: TextStyle(fontSize: 12, color: Colors.black54)),
-                          ],
-                        )
-                      ),
-                      Icon(Icons.arrow_forward_ios, color: Colors.teal, size: 18)
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          // =====================================
 
           Expanded(
             child: GridView.count(

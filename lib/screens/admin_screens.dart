@@ -22,6 +22,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'customer_screens.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:fl_chart/fl_chart.dart';
 
 
 
@@ -184,23 +185,33 @@ class AdminDashboard extends StatelessWidget {
         child: ListView(
           padding: EdgeInsets.zero,
           children:[
-            UserAccountsDrawerHeader(
-              decoration: const BoxDecoration(color: Colors.deepOrange),
-              accountName: FutureBuilder<DocumentSnapshot>(
-                future: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).get(),
-                builder: (context, snapshot) {
-                  if (snapshot.hasData && snapshot.data!.exists) {
-                    return Text(snapshot.data!['name'] ?? 'Admin', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18));
-                  }
-                  return const Text('Chief Admin', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18));
-                },
-              ),
-              accountEmail: const Text('Super Admin Panel', style: TextStyle(color: Colors.white70)),
-              currentAccountPicture: const CircleAvatar(
-                backgroundColor: Colors.white, 
-                child: Icon(Icons.admin_panel_settings, size: 40, color: Colors.deepOrange)
-              ),
-            ),
+            StreamBuilder<DocumentSnapshot>(
+            stream: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).snapshots(),
+            builder: (context, snapshot) {
+              String name = 'Admin';
+              String img = '';
+              
+              if (snapshot.hasData && snapshot.data!.exists) {
+                var data = snapshot.data!.data() as Map<String, dynamic>;
+                name = data['name'] ?? 'Admin';
+                img = data['profile_image_url'] ?? ''; // ডাটাবেস থেকে ছবি আনা হচ্ছে
+              }
+
+              return UserAccountsDrawerHeader(
+                decoration: const BoxDecoration(color: Colors.deepOrange),
+                accountName: Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                
+                // নামের নিচের লেখাটি মুছার জন্য এখানে খালি SizedBox দেওয়া হলো
+                accountEmail: const SizedBox(), 
+                
+                currentAccountPicture: CircleAvatar(
+                  backgroundColor: Colors.white,
+                  backgroundImage: img.isNotEmpty ? NetworkImage(img) : null,
+                  child: img.isEmpty ? const Icon(Icons.admin_panel_settings, size: 40, color: Colors.deepOrange) : null,
+                ),
+              );
+            },
+          ),
               ListTile(leading: const Icon(Icons.notifications_active, color: Colors.blue), title: const Text('Push Notifications', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('Send offers to all', style: TextStyle(fontSize: 10, color: Colors.grey)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminNotificationPage())); }),
               ListTile(leading: const Icon(Icons.category, color: Colors.teal), title: const Text('Manage Categories', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminManageCategoriesPage())); }),
               ListTile(leading: const Icon(Icons.view_carousel, color: Colors.orange), title: const Text('Manage Banners', style: TextStyle(fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminBannerManagementPage())); }),
@@ -1013,7 +1024,7 @@ class _AdminProductApprovalPageState extends State<AdminProductApprovalPage> {
 }
 
 // ==========================================
-// অ্যাডমিন পেজ ২: User & Seller Management (Pro UI, Search, Filter, Stats, WA & Ban)
+// অ্যাডমিন পেজ ২: User & Seller Management (Search, Collapsible Cards & Super Admin Actions)
 // ==========================================
 class AdminUserManagement extends StatefulWidget {
   const AdminUserManagement({super.key});
@@ -1024,23 +1035,91 @@ class AdminUserManagement extends StatefulWidget {
 
 class _AdminUserManagementState extends State<AdminUserManagement> {
   int _selectedTab = 0; // 0 = Customers, 1 = Sellers
-  String searchQuery = '';
-  String selectedFilter = 'All'; // All, Active, Banned, Pending (for sellers)
+  String _searchQuery = ''; 
+  bool isSuperAdmin = false; // [NEW] সুপার অ্যাডমিন চেক করার জন্য
+
+  @override
+  void initState() {
+    super.initState();
+    _checkAdminRole();
+  }
+
+  // [NEW] বর্তমান ইউজারের রোল চেক করা হচ্ছে
+  Future<void> _checkAdminRole() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      var doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      if (doc.exists && mounted) {
+        setState(() {
+          isSuperAdmin = (doc.data() as Map<String, dynamic>)['role'] == 'super_admin';
+        });
+      }
+    }
+  }
+
+  Future<String> _fetchAddress(Map<String, dynamic> data, String uid, bool isSeller) async {
+    if (isSeller) {
+      if (data.containsKey('latitude') && data.containsKey('longitude')) {
+        try {
+          List<Placemark> placemarks = await placemarkFromCoordinates(data['latitude'], data['longitude']);
+          if (placemarks.isNotEmpty) {
+            Placemark p = placemarks.first;
+            String address = '';
+            if (p.street != null && p.street!.isNotEmpty) address += '${p.street}, ';
+            if (p.subLocality != null && p.subLocality!.isNotEmpty) address += '${p.subLocality}, ';
+            if (p.locality != null && p.locality!.isNotEmpty) address += '${p.locality}';
+            return address.isNotEmpty ? address : 'Lat: ${data['latitude']}, Lng: ${data['longitude']}';
+          }
+        } catch (e) {
+          return 'Lat: ${data['latitude']}, Lng: ${data['longitude']}';
+        }
+      }
+      return 'No location saved';
+    } else {
+      var snap = await FirebaseFirestore.instance.collection('users').doc(uid).collection('addresses').where('is_default', isEqualTo: true).limit(1).get();
+      if (snap.docs.isNotEmpty) {
+        return snap.docs.first['shipping_address_text'] ?? 'Unknown address';
+      }
+      return 'No saved address yet';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     bool isSellerTab = _selectedTab == 1;
 
     return Scaffold(
-      backgroundColor: Colors.grey[100],
+      backgroundColor: Colors.grey[200],
       appBar: AppBar(
         backgroundColor: Colors.orange[200], 
-        title: const Text('Management Hub', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), 
-        iconTheme: const IconThemeData(color: Colors.black)
+        iconTheme: const IconThemeData(color: Colors.black),
+        title: Container(
+          height: 40,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: TextField(
+            onChanged: (value) => setState(() => _searchQuery = value.toLowerCase().trim()),
+            decoration: const InputDecoration(
+              hintText: 'Search by Name or Phone...',
+              prefixIcon: Icon(Icons.search, color: Colors.grey),
+              border: InputBorder.none,
+              contentPadding: EdgeInsets.symmetric(vertical: 10),
+            ),
+          ),
+        ),
+        actions:[
+          IconButton(
+            icon: const Icon(Icons.filter_list, color: Colors.black87),
+            onPressed: () {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Filter options coming soon!')));
+            },
+          )
+        ],
       ),
       body: Column(
         children:[
-          // 🔴 টগল বাটন
           Padding(
             padding: const EdgeInsets.all(15), 
             child: Row(
@@ -1048,68 +1127,29 @@ class _AdminUserManagementState extends State<AdminUserManagement> {
               children:[
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: () => setState(() { _selectedTab = 0; selectedFilter = 'All'; }), 
-                    style: ElevatedButton.styleFrom(backgroundColor: !isSellerTab ? Colors.deepOrange : Colors.white, foregroundColor: !isSellerTab ? Colors.white : Colors.black), 
+                    onPressed: () => setState(() { _selectedTab = 0; _searchQuery = ''; }), 
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: !isSellerTab ? Colors.deepOrange : Colors.white, 
+                      foregroundColor: !isSellerTab ? Colors.white : Colors.black
+                    ), 
                     child: const Text('Customers')
                   )
                 ), 
                 const SizedBox(width: 10), 
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: () => setState(() { _selectedTab = 1; selectedFilter = 'All'; }), 
-                    style: ElevatedButton.styleFrom(backgroundColor: isSellerTab ? Colors.teal : Colors.white, foregroundColor: isSellerTab ? Colors.white : Colors.black), 
+                    onPressed: () => setState(() { _selectedTab = 1; _searchQuery = ''; }), 
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: isSellerTab ? Colors.teal : Colors.white, 
+                      foregroundColor: isSellerTab ? Colors.white : Colors.black
+                    ), 
                     child: const Text('Sellers')
                   )
                 )
               ]
             )
           ),
-
-          // 🔴 সার্চ এবং ফিল্টার বার
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 15),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    onChanged: (val) => setState(() => searchQuery = val.toLowerCase().trim()),
-                    decoration: InputDecoration(
-                      hintText: 'Search name, email or phone...',
-                      prefixIcon: const Icon(Icons.search, color: Colors.grey),
-                      filled: true, fillColor: Colors.white,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Container(
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
-                  child: PopupMenuButton<String>(
-                    icon: const Icon(Icons.filter_list, color: Colors.deepOrange),
-                    tooltip: 'Filter Users',
-                    onSelected: (val) => setState(() => selectedFilter = val),
-                    itemBuilder: (context) => [
-                      const PopupMenuItem(value: 'All', child: Text('All Users')),
-                      const PopupMenuItem(value: 'Active', child: Text('Active Only', style: TextStyle(color: Colors.green))),
-                      const PopupMenuItem(value: 'Banned', child: Text('Banned/Frozen', style: TextStyle(color: Colors.red))),
-                      if (isSellerTab) const PopupMenuItem(value: 'Pending', child: Text('Pending Approval', style: TextStyle(color: Colors.orange))),
-                    ]
-                  ),
-                )
-              ],
-            ),
-          ),
           
-          if (selectedFilter != 'All')
-             Padding(
-               padding: const EdgeInsets.only(top: 10, left: 15),
-               child: Align(alignment: Alignment.centerLeft, child: Text('Showing: $selectedFilter', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.deepOrange))),
-             ),
-
-          const SizedBox(height: 10),
-
-          // 🔴 ডাটাবেস থেকে ইউজার লিস্ট
           Expanded(
             child: StreamBuilder(
               stream: FirebaseFirestore.instance.collection('users')
@@ -1119,34 +1159,238 @@ class _AdminUserManagementState extends State<AdminUserManagement> {
                 if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
                 if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return Center(child: Text(!isSellerTab ? 'No customers found!' : 'No sellers found!', style: const TextStyle(color: Colors.grey)));
 
-                var users = snapshot.data!.docs.where((doc) {
-                  Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-                  String name = (data['name']?.toString() ?? '').toLowerCase();
-                  String sName = (data['shop_name']?.toString() ?? '').toLowerCase();
-                  String phone = (data['phone']?.toString() ?? '').toLowerCase();
-                  String status = data['status']?.toString() ?? 'active';
-                  
-                  // সার্চ লজিক
-                  bool matchesSearch = name.contains(searchQuery) || sName.contains(searchQuery) || phone.contains(searchQuery);
-                  
-                  // ফিল্টার লজিক
-                  bool matchesFilter = true;
-                  if (selectedFilter == 'Active') matchesFilter = (status == 'active' || status == 'approved');
-                  if (selectedFilter == 'Banned') matchesFilter = (status == 'banned' || status == 'frozen');
-                  if (selectedFilter == 'Pending') matchesFilter = (status == 'pending');
+                var users = snapshot.data!.docs;
 
-                  return matchesSearch && matchesFilter;
-                }).toList();
+                if (_searchQuery.isNotEmpty) {
+                  users = users.where((doc) {
+                    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+                    String name = (data['name'] ?? '').toString().toLowerCase();
+                    String shop = (data['shop_name'] ?? '').toString().toLowerCase();
+                    String phone = (data['phone'] ?? '').toString().toLowerCase();
+                    return name.contains(_searchQuery) || shop.contains(_searchQuery) || phone.contains(_searchQuery);
+                  }).toList();
+                }
 
-                if (users.isEmpty) return const Center(child: Text('No matching results found.'));
+                if (users.isEmpty) return const Center(child: Text('কোনো রেজাল্ট পাওয়া যায়নি!'));
 
                 return ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 15),
                   itemCount: users.length,
                   itemBuilder: (context, index) {
-                    return UserAdminCard(
-                      userDoc: users[index], 
-                      isSeller: isSellerTab
+                    var userDoc = users[index];
+                    Map<String, dynamic> data = userDoc.data() as Map<String, dynamic>;
+                    
+                    String status = data.containsKey('status') ? data['status'] : 'approved';
+                    bool isPending = status == 'pending';
+                    bool isBlocked = status == 'blocked'; // [NEW] ব্লক স্ট্যাটাস
+                    String imgUrl = data.containsKey('profile_image_url') ? data['profile_image_url'] : '';
+                    String userName = data.containsKey('shop_name') && data['shop_name'].toString().isNotEmpty && isSellerTab ? data['shop_name'] : data['name'] ?? 'Unknown';
+                    String phone = data['phone'] ?? 'No Phone';
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 15), 
+                      clipBehavior: Clip.antiAlias,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                        side: const BorderSide(color: Colors.deepOrange, width: 1.5) 
+                      ),
+                      child: Theme(
+                        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                        child: ExpansionTile(
+                          backgroundColor: Colors.white,
+                          collapsedBackgroundColor: Colors.deepOrange.withOpacity(0.10),
+                          tilePadding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+                          // ==========================================
+                          // হেডার অংশ (যেটা সবসময় দেখা যাবে)
+                          // ==========================================
+                          title: Row(
+                            children:[
+                              CircleAvatar(
+                                radius: 25,
+                                backgroundColor: Colors.white,
+                                backgroundImage: imgUrl.isNotEmpty ? NetworkImage(imgUrl) : null,
+                                child: imgUrl.isEmpty ? Icon(!isSellerTab ? Icons.person : Icons.store, color: Colors.deepOrange) : null,
+                              ),
+                              const SizedBox(width: 15),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start, 
+                                  children:[
+                                    Text(userName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.black87)), 
+                                    Text(phone, style: const TextStyle(color: Colors.deepOrange, fontSize: 13, fontWeight: FontWeight.bold)),
+                                    
+                                    // [NEW] যদি ইউজার ব্লকড থাকে, তবে লাল রঙের ব্যাজ দেখাবে
+                                    if (isBlocked)
+                                      Container(
+                                        margin: const EdgeInsets.only(top: 4),
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(4)),
+                                        child: const Text('BLOCKED', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                                      ),
+                                  ]
+                                )
+                              ),
+                              if (isSellerTab && isPending)
+                                ElevatedButton(
+                                  onPressed: () {
+                                    userDoc.reference.update({'status': 'approved'});
+                                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Seller Approved! ✅')));
+                                  }, 
+                                  style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, visualDensity: VisualDensity.compact), 
+                                  child: const Text('Approve', style: TextStyle(color: Colors.white, fontSize: 12))
+                                )
+                              else if (isSellerTab && !isPending && !isBlocked)
+                                const Icon(Icons.verified, color: Colors.green),
+
+                              // ==========================================
+                              // [NEW] Super Admin Menu (Freeze/Delete)
+                              // ==========================================
+                              if (isSuperAdmin)
+                                PopupMenuButton<String>(
+                                  icon: const Icon(Icons.more_vert, color: Colors.grey),
+                                  onSelected: (value) async {
+                                    if (value == 'block') {
+                                      await userDoc.reference.update({'status': isBlocked ? 'approved' : 'blocked'});
+                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(isBlocked ? 'User Unblocked! ✅' : 'User Blocked! 🚫')));
+                                    } else if (value == 'delete') {
+                                      // ডিলিট করার আগে ওয়ার্নিং কনফার্মেশন
+                                      bool confirm = await showDialog(
+                                        context: context,
+                                        builder: (context) => AlertDialog(
+                                          title: const Text('Delete Account?', style: TextStyle(color: Colors.red)),
+                                          content: const Text('Are you sure you want to permanently delete this user? All their data will be lost.'),
+                                          actions:[
+                                            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+                                            ElevatedButton(
+                                              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                                              onPressed: () => Navigator.pop(context, true),
+                                              child: const Text('Delete', style: TextStyle(color: Colors.white)),
+                                            )
+                                          ],
+                                        )
+                                      ) ?? false;
+                                      
+                                      if (confirm) {
+                                        await userDoc.reference.delete();
+                                        if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account deleted successfully!')));
+                                      }
+                                    }
+                                  },
+                                  itemBuilder: (context) =>[
+                                    PopupMenuItem(
+                                      value: 'block',
+                                      child: Row(
+                                        children:[
+                                          Icon(isBlocked ? Icons.lock_open : Icons.block, color: isBlocked ? Colors.green : Colors.orange, size: 18),
+                                          const SizedBox(width: 8),
+                                          Text(isBlocked ? 'Unblock Account' : 'Freeze / Block'),
+                                        ],
+                                      ),
+                                    ),
+                                    const PopupMenuItem(
+                                      value: 'delete',
+                                      child: Row(
+                                        children:[
+                                          Icon(Icons.delete, color: Colors.red, size: 18),
+                                          const SizedBox(width: 8),
+                                          Text('Delete Account', style: TextStyle(color: Colors.red)),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                            ],
+                          ),
+                          // ==========================================
+                          // বডি অংশ (ক্লিক করলে বের হবে)
+                          // ==========================================
+                          children:[
+                            Container(
+                              color: Colors.grey.shade50,
+                              padding: const EdgeInsets.all(15.0),
+                              child: Column(
+                                children:[
+                                  Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children:[
+                                      const Icon(Icons.location_on, color: Colors.red, size: 18),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: FutureBuilder<String>(
+                                          future: _fetchAddress(data, userDoc.id, isSellerTab),
+                                          builder: (context, addrSnap) {
+                                            if (addrSnap.connectionState == ConnectionState.waiting) return const Text('Loading address...', style: TextStyle(fontSize: 12, color: Colors.grey));
+                                            return Text(addrSnap.data ?? 'No address', style: const TextStyle(fontSize: 13, color: Colors.black87));
+                                          }
+                                        )
+                                      ),
+                                    ]
+                                  ),
+                                  const SizedBox(height: 15),
+
+                                  if (!isSellerTab) ...[
+                                    StreamBuilder<QuerySnapshot>(
+                                      stream: FirebaseFirestore.instance.collection('orders').where('user_id', isEqualTo: userDoc.id).snapshots(),
+                                      builder: (context, orderSnap) {
+                                        if (!orderSnap.hasData) return const SizedBox(height: 30, child: Center(child: LinearProgressIndicator(minHeight: 2, color: Colors.green)));
+                                        
+                                        int total = orderSnap.data!.docs.length;
+                                        int success = orderSnap.data!.docs.where((d) => (d.data() as Map<String, dynamic>)['status'] == 'Delivered').length;
+                                        int failed = orderSnap.data!.docs.where((d) => (d.data() as Map<String, dynamic>)['status'] == 'Delivery Failed').length;
+                                        
+                                        return Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.green.shade50, 
+                                            borderRadius: BorderRadius.circular(10),
+                                            border: Border.all(color: Colors.green.shade200, width: 1)
+                                          ),
+                                          child: Row(
+                                            mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                            children: [
+                                              Column(children:[const Text('Total Orders', style: TextStyle(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text('$total', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18))]),
+                                              Container(height: 30, width: 1, color: Colors.green.shade200),
+                                              Column(children:[const Text('Success', style: TextStyle(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text('$success', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 18))]),
+                                              Container(height: 30, width: 1, color: Colors.green.shade200),
+                                              Column(children:[const Text('Failed', style: TextStyle(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text('$failed', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red, fontSize: 18))]),
+                                            ]
+                                          ),
+                                        );
+                                      }
+                                    ),
+                                    const SizedBox(height: 15),
+                                  ],
+
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.center, 
+                                    children:[
+                                      if (isSellerTab) ...[
+                                        TextButton.icon(
+                                          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => AdminSellerProductsPage(sellerId: userDoc.id, sellerName: userName))), 
+                                          icon: const Icon(Icons.inventory_2, size: 18, color: Colors.deepPurple), 
+                                          label: const Text('Products', style: TextStyle(color: Colors.deepPurple, fontWeight: FontWeight.bold))
+                                        ),
+                                        const SizedBox(width: 15),
+                                        TextButton.icon(
+                                          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => AdminSellerSalesPage(sellerId: userDoc.id, sellerName: userName))), 
+                                          icon: const Icon(Icons.bar_chart, size: 18, color: Colors.teal), 
+                                          label: const Text('Sales', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold))
+                                        )
+                                      ] else ...[
+                                        TextButton.icon(
+                                          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => AdminCustomerOrdersPage(customerId: userDoc.id, customerName: userName))), 
+                                          icon: const Icon(Icons.receipt_long, size: 18, color: Colors.blue), 
+                                          label: const Text('View Detailed Orders List', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold))
+                                        )
+                                      ]
+                                    ]
+                                  )
+                                ],
+                              ),
+                            )
+                          ],
+                        ),
+                      ),
                     );
                   }
                 );
@@ -1154,6 +1398,307 @@ class _AdminUserManagementState extends State<AdminUserManagement> {
             ),
           )
         ],
+      ),
+    );
+  }
+}
+
+// ==========================================
+// সাব-পেজ: কাস্টমারের অর্ডার হিস্ট্রি (Search & Collapsible Tracking)
+// ==========================================
+class AdminCustomerOrdersPage extends StatefulWidget {
+  final String customerId;
+  final String customerName;
+  const AdminCustomerOrdersPage({super.key, required this.customerId, required this.customerName});
+
+  @override
+  State<AdminCustomerOrdersPage> createState() => _AdminCustomerOrdersPageState();
+}
+
+class _AdminCustomerOrdersPageState extends State<AdminCustomerOrdersPage> {
+  String _searchQuery = ''; // [NEW] অর্ডার সার্চ করার জন্য
+
+  Widget _buildTimelineRow(String title, dynamic timestamp, bool isCompleted, {bool isLast = false, bool isError = false}) {
+    String timeStr = '--';
+    if (timestamp != null && timestamp is Timestamp) {
+      DateTime dt = timestamp.toDate();
+      timeStr = '${dt.day}/${dt.month}/${dt.year}  ${dt.hour > 12 ? dt.hour - 12 : (dt.hour == 0 ? 12 : dt.hour)}:${dt.minute.toString().padLeft(2, '0')} ${dt.hour >= 12 ? 'PM' : 'AM'}';
+    }
+    Color activeColor = isError ? Colors.red : Colors.teal;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children:[
+          Column(
+            children:[
+              Icon(isCompleted ? (isError ? Icons.cancel : Icons.check_circle) : Icons.radio_button_unchecked, size: 18, color: isCompleted ? activeColor : Colors.grey.shade400),
+              if (!isLast) Container(height: 20, width: 2, color: isCompleted ? activeColor : Colors.grey.shade300),
+            ],
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children:[
+                Text(title, style: TextStyle(fontSize: 13, fontWeight: isCompleted ? FontWeight.bold : FontWeight.normal, color: isCompleted ? (isError ? Colors.red : Colors.black87) : Colors.grey)),
+                if (isCompleted && timestamp != null) Text(timeStr, style: TextStyle(fontSize: 11, color: activeColor)),
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey.shade200,
+      appBar: AppBar(
+        backgroundColor: Colors.blue, 
+        iconTheme: const IconThemeData(color: Colors.white),
+        // [NEW] Search Box in AppBar
+        title: Container(
+          height: 40,
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8)),
+          child: TextField(
+            onChanged: (value) => setState(() => _searchQuery = value.toLowerCase().trim()),
+            decoration: InputDecoration(
+              hintText: "Search ${widget.customerName}'s Orders...",
+              prefixIcon: const Icon(Icons.search, color: Colors.grey),
+              border: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(vertical: 10),
+            ),
+          ),
+        ),
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance.collection('orders').where('user_id', isEqualTo: widget.customerId).snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return Center(child: Text('Error: ${snapshot.error}'));
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('এই কাস্টমার এখনো কোনো অর্ডার করেননি।'));
+
+          var docs = snapshot.data!.docs.toList();
+          
+          // [NEW] Search Logic for Orders (By Order ID)
+          if (_searchQuery.isNotEmpty) {
+            docs = docs.where((doc) => doc.id.toLowerCase().contains(_searchQuery)).toList();
+          }
+
+          if (docs.isEmpty) return const Center(child: Text('কোনো অর্ডার পাওয়া যায়নি।'));
+
+          docs.sort((a, b) {
+            var dataA = a.data() as Map<String, dynamic>;
+            var dataB = b.data() as Map<String, dynamic>;
+            Timestamp? tA = dataA['order_date'] as Timestamp?;
+            Timestamp? tB = dataB['order_date'] as Timestamp?;
+            if (tA == null || tB == null) return 0;
+            return tB.compareTo(tA);
+          });
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(15),
+            itemCount: docs.length,
+            itemBuilder: (context, index) {
+              var doc = docs[index];
+              var data = doc.data() as Map<String, dynamic>;
+              
+              String status = data['status'] ?? 'Pending';
+              Color statusColor = Colors.orange; 
+              if (['Processing', 'Ready to Ship'].contains(status)) statusColor = Colors.blue;
+              if (['Dispatched', 'In-Transit'].contains(status)) statusColor = Colors.purple;
+              if (status == 'Delivered') statusColor = Colors.green;
+              if (['Delivery Failed', 'Cancelled'].contains(status)) statusColor = Colors.red;
+
+              List<dynamic> items = data['items'] ??[];
+
+              //[NEW] ExpansionTile for Order Cards
+              return Card(
+                margin: const EdgeInsets.only(bottom: 20),
+                clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                  side: BorderSide(color: statusColor, width: 1.5)
+                ),
+                child: Theme(
+                  data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                  child: ExpansionTile(
+                    backgroundColor: Colors.white,
+                    collapsedBackgroundColor: statusColor.withOpacity(0.05),
+                    tilePadding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+                    // Header (Always Visible)
+                    title: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children:[
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children:[
+                            Text('Order #${doc.id.substring(0, 8).toUpperCase()}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                            if (data['order_date'] != null)
+                              Text('Placed: ${(data['order_date'] as Timestamp).toDate().toString().substring(0, 16)}', style: const TextStyle(fontSize: 11, color: Colors.black54)),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(color: statusColor, borderRadius: BorderRadius.circular(20)),
+                          child: Text(status.toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+                        ),
+                      ],
+                    ),
+                    // Body (Hidden by default, expands on click)
+                    children:[
+                      Container(
+                        color: Colors.white,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children:[
+                            Padding(
+                              padding: const EdgeInsets.all(15),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children:[
+                                  const Text('ORDERED ITEMS', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.grey)),
+                                  const SizedBox(height: 10),
+                                  ...items.map((item) {
+                                    String color = item['selected_color']?.toString() ?? '';
+                                    String size = item['selected_size']?.toString() ?? '';
+                                    String variantText = [color, size].where((e) => e.isNotEmpty && e != 'Default').join(' | ');
+                                    
+                                    return FutureBuilder<DocumentSnapshot>(
+                                      future: FirebaseFirestore.instance.collection('users').doc(item['seller_id']?.toString() ?? '').get(),
+                                      builder: (context, sellerSnap) {
+                                        String sellerName = 'Unknown Seller';
+                                        if (sellerSnap.hasData && sellerSnap.data!.exists) {
+                                          var sData = sellerSnap.data!.data() as Map<String, dynamic>;
+                                          sellerName = sData['shop_name'] ?? sData['name'] ?? 'Unknown Seller';
+                                        }
+                                        
+                                        return Container(
+                                          margin: const EdgeInsets.only(bottom: 10),
+                                          padding: const EdgeInsets.all(10),
+                                          decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)),
+                                          child: Row(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children:[
+                                              Container(
+                                                width: 60, height: 60,
+                                                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300)),
+                                                child: (item['image_url'] != null && item['image_url'].toString().isNotEmpty) 
+                                                    ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(item['image_url'], fit: BoxFit.cover))
+                                                    : const Icon(Icons.image, color: Colors.grey),
+                                              ),
+                                              const SizedBox(width: 10),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children:[
+                                                    Text(item['product_name'] ?? 'Product', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                                    if (variantText.isNotEmpty)
+                                                      Text('Variant: $variantText', style: const TextStyle(fontSize: 11, color: Colors.blueGrey)),
+                                                    Text('Code: ${item['product_id']?.toString().substring(0,6) ?? 'N/A'}  •  Shop: $sellerName', style: const TextStyle(fontSize: 10, color: Colors.teal)),
+                                                  ],
+                                                ),
+                                              ),
+                                              Column(
+                                                crossAxisAlignment: CrossAxisAlignment.end,
+                                                children:[
+                                                  Text('৳${item['price']}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                                                  Text('Qty: ${item['quantity']}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                                                ],
+                                              )
+                                            ],
+                                          ),
+                                        );
+                                      }
+                                    );
+                                  }),
+                                ],
+                              ),
+                            ),
+
+                            const Divider(height: 1),
+
+                            Padding(
+                              padding: const EdgeInsets.all(15),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children:[
+                                  const Text('LIVE TRACKING HISTORY', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.grey)),
+                                  const SizedBox(height: 15),
+                                  _buildTimelineRow('Order Placed', data['order_date'], true),
+                                  _buildTimelineRow('Admin Confirmed & Processing', data['processing_at'], status != 'Pending'),
+                                  _buildTimelineRow('Seller Packed & Ready', data['ready_to_ship_at'],['Ready to Ship', 'Dispatched', 'In-Transit', 'Delivered'].contains(status)),
+                                  _buildTimelineRow('Handed Over to Logistics', data['dispatched_at'], ['Dispatched', 'In-Transit', 'Delivered'].contains(status)),
+                                  if (status != 'Delivery Failed')
+                                    _buildTimelineRow('Delivered Successfully', data['delivered_at'], status == 'Delivered', isLast: true),
+                                  if (status == 'Delivery Failed')
+                                    _buildTimelineRow('Delivery Failed\nReason: ${data['failed_reason'] ?? 'Unknown'}', data['failed_at'], true, isLast: true, isError: true),
+                                ],
+                              ),
+                            ),
+
+                            if (data['assigned_rider_id'] != null || data['delivery_type'] == 'courier')
+                              Container(
+                                width: double.infinity,
+                                color: Colors.blue.shade50,
+                                padding: const EdgeInsets.all(15),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children:[
+                                    const Text('LOGISTICS INFO', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.blue)),
+                                    const SizedBox(height: 5),
+                                    if (data['delivery_type'] == 'courier')
+                                      Text('Courier: ${data['courier_name']} (Tracking: ${data['tracking_id']})', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87))
+                                    else
+                                      FutureBuilder<DocumentSnapshot>(
+                                        future: FirebaseFirestore.instance.collection('users').doc(data['assigned_rider_id']).get(),
+                                        builder: (context, riderSnap) {
+                                          if (!riderSnap.hasData) return const Text('Loading rider info...', style: TextStyle(fontSize: 12, color: Colors.grey));
+                                          var rData = riderSnap.data!.data() as Map<String, dynamic>?;
+                                          String rName = rData?['name'] ?? 'Unknown Rider';
+                                          String rPhone = rData?['phone'] ?? 'No phone';
+                                          return Row(
+                                            children:[
+                                              const Icon(Icons.motorcycle, size: 18, color: Colors.blue),
+                                              const SizedBox(width: 8),
+                                              Text('Rider: $rName ($rPhone)', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)),
+                                            ],
+                                          );
+                                        }
+                                      )
+                                  ],
+                                ),
+                              ),
+
+                            Container(
+                              color: Colors.grey.shade100,
+                              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children:[
+                                  Row(
+                                    children:[
+                                      const Icon(Icons.payments, size: 16, color: Colors.teal),
+                                      const SizedBox(width: 5),
+                                      Text(data['payment_method'] ?? 'COD', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
+                                    ],
+                                  ),
+                                  Text('Total: ৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 18)),
+                                ],
+                              ),
+                            )
+                          ],
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              );
+            }
+          );
+        },
       ),
     );
   }
@@ -1381,138 +1926,138 @@ class _UserAdminCardState extends State<UserAdminCard> {
 }
 
 // ==========================================
-// নতুন সাব-পেজ ১: সেলারের প্রোডাক্ট লিস্ট (With Moderation: Freeze/Delete)
+// নতুন সাব-পেজ ১: সেলারের প্রোডাক্ট লিস্ট (Detailed & Searchable)
 // ==========================================
-class AdminSellerProductsPage extends StatelessWidget {
+class AdminSellerProductsPage extends StatefulWidget {
   final String sellerId;
   final String sellerName;
   const AdminSellerProductsPage({super.key, required this.sellerId, required this.sellerName});
 
-  // 🔴 প্রোডাক্ট মডারেশন ফাংশন (Freeze বা Delete করার জন্য)
-  void _moderateProduct(BuildContext context, DocumentSnapshot doc, String action, String productName) {
-    TextEditingController reasonCtrl = TextEditingController();
-    
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(action == 'freeze' ? 'Freeze Product ❄️' : 'Delete Product ❌', style: TextStyle(color: action == 'freeze' ? Colors.blue : Colors.red)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(action == 'freeze' ? 'এই প্রোডাক্টটি সাময়িকভাবে বন্ধ হয়ে যাবে।' : 'এই প্রোডাক্টটি সেলার এবং কাস্টমার সবার থেকে হাইড হয়ে যাবে (সফট ডিলিট)।', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-            const SizedBox(height: 10),
-            TextField(
-              controller: reasonCtrl,
-              decoration: const InputDecoration(labelText: 'Reason (সেলারকে জানানো হবে)', border: OutlineInputBorder(), isDense: true),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: action == 'freeze' ? Colors.blue : Colors.red),
-            onPressed: () async {
-              if (reasonCtrl.text.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('দয়া করে কারণ উল্লেখ করুন!')));
-                return;
-              }
-              
-              String newStatus = action == 'freeze' ? 'frozen' : 'deleted';
-              
-              // 1. Update Database
-              await doc.reference.update({
-                'status': newStatus, 
-                'is_active': false,
-                'admin_action_reason': reasonCtrl.text.trim(),
-              });
+  @override
+  State<AdminSellerProductsPage> createState() => _AdminSellerProductsPageState();
+}
 
-              // 2. Send Notification to Seller
-              await FirebaseFirestore.instance.collection('notifications').add({
-                'target_user_id': sellerId,
-                'title': action == 'freeze' ? 'Product Frozen by Admin ❄️' : 'Product Removed by Admin ❌',
-                'message': 'আপনার প্রোডাক্ট "$productName" অ্যাডমিন কর্তৃক ${action == 'freeze' ? 'ফ্রিজ' : 'রিমুভ'} করা হয়েছে। কারণ: ${reasonCtrl.text.trim()}',
-                'sent_at': FieldValue.serverTimestamp(),
-              });
-
-              if (ctx.mounted) {
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Product $newStatus successfully!')));
-              }
-            },
-            child: const Text('Confirm', style: TextStyle(color: Colors.white))
-          )
-        ]
-      )
-    );
-  }
+class _AdminSellerProductsPageState extends State<AdminSellerProductsPage> {
+  String _searchQuery = ''; // [NEW] সার্চের জন্য
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[100],
-      appBar: AppBar(title: Text('$sellerName\'s Products', style: const TextStyle(fontSize: 16)), backgroundColor: Colors.deepPurple, foregroundColor: Colors.white),
+      backgroundColor: Colors.grey.shade200,
+      appBar: AppBar(
+        backgroundColor: Colors.deepPurple, 
+        iconTheme: const IconThemeData(color: Colors.white),
+        // [NEW] Search Box in AppBar
+        title: Container(
+          height: 40,
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8)),
+          child: TextField(
+            onChanged: (value) => setState(() => _searchQuery = value.toLowerCase().trim()),
+            decoration: InputDecoration(
+              hintText: "Search ${widget.sellerName}'s Products...",
+              prefixIcon: const Icon(Icons.search, color: Colors.grey),
+              border: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(vertical: 10),
+            ),
+          ),
+        ),
+      ),
       body: StreamBuilder<QuerySnapshot>(
-        // 🔴 আমরা সব স্ট্যাটাসের প্রোডাক্টই আনবো যাতে অ্যাডমিন ডিলিট করা প্রোডাক্টও দেখতে পারে
-        stream: FirebaseFirestore.instance.collection('products').where('seller_id', isEqualTo: sellerId).snapshots(),
+        stream: FirebaseFirestore.instance.collection('products').where('seller_id', isEqualTo: widget.sellerId).snapshots(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
           if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('এই সেলার এখনো কোনো প্রোডাক্ট আপলোড করেননি।'));
 
+          var docs = snapshot.data!.docs.toList();
+
+          // [NEW] Search Logic
+          if (_searchQuery.isNotEmpty) {
+            docs = docs.where((doc) {
+              Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+              String name = (data['product_name'] ?? '').toString().toLowerCase();
+              String category = (data['category'] ?? '').toString().toLowerCase();
+              return name.contains(_searchQuery) || category.contains(_searchQuery);
+            }).toList();
+          }
+
+          if (docs.isEmpty) return const Center(child: Text('কোনো প্রোডাক্ট পাওয়া যায়নি।'));
+
+          // নতুন প্রোডাক্ট আগে দেখাবে
+          docs.sort((a, b) {
+            var tA = (a.data() as Map<String, dynamic>)['timestamp'] as Timestamp?;
+            var tB = (b.data() as Map<String, dynamic>)['timestamp'] as Timestamp?;
+            if (tA == null || tB == null) return 0;
+            return tB.compareTo(tA);
+          });
+
           return ListView.builder(
             padding: const EdgeInsets.all(15),
-            itemCount: snapshot.data!.docs.length,
+            itemCount: docs.length,
             itemBuilder: (context, index) {
-              var doc = snapshot.data!.docs[index];
+              var doc = docs[index];
               var data = doc.data() as Map<String, dynamic>;
-              String img = data.containsKey('image_urls') && (data['image_urls'] as List).isNotEmpty ? data['image_urls'][0] : '';
               
+              String img = data.containsKey('image_urls') && (data['image_urls'] as List).isNotEmpty ? data['image_urls'][0] : '';
               String status = data['status'] ?? 'pending';
-              Color statusColor = status == 'approved' ? Colors.green : (status == 'pending' ? Colors.orange : Colors.red);
+              int stock = int.tryParse(data['stock']?.toString() ?? '0') ?? 0;
+              
+              int price = int.tryParse(data['price']?.toString() ?? '0') ?? 0;
+              int originalPrice = int.tryParse(data['original_price']?.toString() ?? '0') ?? 0;
+              
+              Color statusColor = status == 'approved' ? Colors.green : (status == 'rejected' ? Colors.red : Colors.orange);
 
-              return Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade300, width: 1.5), // 🔴 স্পষ্ট বর্ডার
-                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 5, offset: const Offset(0, 3))] // 🔴 শ্যাডো
-                ),
-                child: ListTile(
-                  contentPadding: const EdgeInsets.all(10),
-                  leading: Container(width: 60, height: 60, decoration: BoxDecoration(borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade200)), child: img.isNotEmpty ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(img, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey)),
-                  title: Text(data['product_name'] ?? 'Product', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                  subtitle: Padding(
-                    padding: const EdgeInsets.only(top: 5.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Price: ৳${data['price']} | Stock: ${data['stock']}', style: const TextStyle(color: Colors.black87, fontSize: 12)),
-                        const SizedBox(height: 5),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2), 
-                          decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(5)), 
-                          child: Text(status.toUpperCase(), style: TextStyle(fontSize: 10, color: statusColor, fontWeight: FontWeight.bold))
-                        ),
-                      ],
-                    ),
-                  ),
-                  
-                  // 🔴 মডারেশন একশন মেনু (Freeze / Delete)
-                  trailing: PopupMenuButton<String>(
-                    icon: const Icon(Icons.more_vert, color: Colors.grey),
-                    onSelected: (value) => _moderateProduct(context, doc, value, data['product_name'] ?? 'Product'),
-                    itemBuilder: (context) => [
-                      if (status != 'frozen' && status != 'deleted')
-                        const PopupMenuItem(
-                          value: 'freeze',
-                          child: Row(children: [Icon(Icons.ac_unit, color: Colors.blue, size: 18), SizedBox(width: 8), Text('Freeze Product')]),
-                        ),
-                      if (status != 'deleted')
-                        const PopupMenuItem(
-                          value: 'delete',
-                          child: Row(children: [Icon(Icons.delete, color: Colors.red, size: 18), SizedBox(width: 8), Text('Delete/Hide', style: TextStyle(color: Colors.red))]),
-                        ),
+              return Card(
+                margin: const EdgeInsets.only(bottom: 15),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children:[
+                      // প্রোডাক্ট ইমেজ
+                      Container(
+                        width: 80, height: 80, 
+                        decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300)), 
+                        child: img.isNotEmpty ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(img, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey)
+                      ),
+                      const SizedBox(width: 12),
+                      
+                      // প্রোডাক্ট ডিটেইলস
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children:[
+                            Text(data['product_name'] ?? 'Product Name', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14), maxLines: 2, overflow: TextOverflow.ellipsis),
+                            const SizedBox(height: 4),
+                            Text('Category: ${data['category'] ?? 'N/A'}', style: const TextStyle(fontSize: 11, color: Colors.blueGrey)),
+                            const SizedBox(height: 8),
+                            
+                            Row(
+                              children:[
+                                Text('৳$price', style: const TextStyle(color: Colors.deepPurple, fontWeight: FontWeight.bold, fontSize: 16)),
+                                const SizedBox(width: 8),
+                                if (originalPrice > price)
+                                  Text('৳$originalPrice', style: const TextStyle(color: Colors.grey, decoration: TextDecoration.lineThrough, fontSize: 12)),
+                              ],
+                            ),
+                          ]
+                        )
+                      ),
+                      
+                      // স্ট্যাটাস এবং স্টক
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children:[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), 
+                            decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(5)), 
+                            child: Text(status.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: statusColor))
+                          ),
+                          const SizedBox(height: 15),
+                          const Text('Stock', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                          Text('$stock', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: stock > 0 ? Colors.green : Colors.red)),
+                        ],
+                      )
                     ],
                   ),
                 ),
@@ -1526,29 +2071,66 @@ class AdminSellerProductsPage extends StatelessWidget {
 }
 
 // ==========================================
-// নতুন সাব-পেজ ২: সেলারের বিক্রয় (Sales) রিপোর্ট
+// নতুন সাব-পেজ ২: সেলারের বিক্রয় (Sales) রিপোর্ট (Detailed & Searchable)
 // ==========================================
-class AdminSellerSalesPage extends StatelessWidget {
+class AdminSellerSalesPage extends StatefulWidget {
   final String sellerId;
   final String sellerName;
   const AdminSellerSalesPage({super.key, required this.sellerId, required this.sellerName});
 
   @override
+  State<AdminSellerSalesPage> createState() => _AdminSellerSalesPageState();
+}
+
+class _AdminSellerSalesPageState extends State<AdminSellerSalesPage> {
+  String _searchQuery = ''; // [NEW] সার্চের জন্য
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('$sellerName\'s Sales', style: const TextStyle(fontSize: 16)), backgroundColor: Colors.teal, foregroundColor: Colors.white),
+      backgroundColor: Colors.grey.shade200,
+      appBar: AppBar(
+        backgroundColor: Colors.teal, 
+        iconTheme: const IconThemeData(color: Colors.white),
+        // [NEW] Search Box in AppBar
+        title: Container(
+          height: 40,
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8)),
+          child: TextField(
+            onChanged: (value) => setState(() => _searchQuery = value.toLowerCase().trim()),
+            decoration: InputDecoration(
+              hintText: "Search sold items...",
+              prefixIcon: const Icon(Icons.search, color: Colors.grey),
+              border: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(vertical: 10),
+            ),
+          ),
+        ),
+      ),
       body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance.collection('products').where('seller_id', isEqualTo: sellerId).snapshots(),
+        stream: FirebaseFirestore.instance.collection('products').where('seller_id', isEqualTo: widget.sellerId).snapshots(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
-          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('কোনো সেলস ডাটা পাওয়া যায়নি।'));
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('কোনো ডাটা পাওয়া যায়নি।'));
 
-          // সেলস কাউন্ট অনুযায়ী সর্টিং
+          // শুধুমাত্র যে প্রোডাক্টগুলো বিক্রি হয়েছে (sales_count > 0) সেগুলো নেওয়া হচ্ছে
           var products = snapshot.data!.docs.where((doc) => ((doc.data() as Map<String, dynamic>)['sales_count'] ?? 0) > 0).toList();
+          
+          // [NEW] Search Logic
+          if (_searchQuery.isNotEmpty) {
+            products = products.where((doc) {
+              Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+              String name = (data['product_name'] ?? '').toString().toLowerCase();
+              return name.contains(_searchQuery);
+            }).toList();
+          }
+
+          // বেশি বিক্রি হওয়া প্রোডাক্ট আগে দেখাবে
           products.sort((a, b) => ((b.data() as Map<String, dynamic>)['sales_count'] ?? 0).compareTo((a.data() as Map<String, dynamic>)['sales_count'] ?? 0));
 
-          if (products.isEmpty) return const Center(child: Text('এই সেলারের এখনো কোনো প্রোডাক্ট বিক্রি হয়নি।'));
+          if (products.isEmpty) return const Center(child: Text('এই সার্চের কোনো প্রোডাক্ট বিক্রি হয়নি।'));
 
+          // মোট আয়ের হিসাব
           double totalRevenue = 0;
           for (var p in products) {
             var d = p.data() as Map<String, dynamic>;
@@ -1557,30 +2139,76 @@ class AdminSellerSalesPage extends StatelessWidget {
 
           return Column(
             children:[
+              // Header: Total Revenue
               Container(
-                width: double.infinity, padding: const EdgeInsets.all(20), color: Colors.teal.shade50,
+                width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 15), 
+                decoration: BoxDecoration(
+                  color: Colors.teal.shade50,
+                  border: Border(bottom: BorderSide(color: Colors.teal.shade200, width: 2))
+                ),
                 child: Column(
                   children:[
-                    const Text('Total Estimated Sales Revenue', style: TextStyle(color: Colors.teal)),
-                    Text('৳${totalRevenue.toStringAsFixed(0)}', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.teal)),
+                    const Text('Filtered Estimated Sales Revenue', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 5),
+                    Text('৳${totalRevenue.toStringAsFixed(0)}', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.teal)),
                   ],
                 ),
               ),
+              
+              // Sales List
               Expanded(
                 child: ListView.builder(
                   padding: const EdgeInsets.all(15),
                   itemCount: products.length,
                   itemBuilder: (context, index) {
                     var data = products[index].data() as Map<String, dynamic>;
+                    String img = data.containsKey('image_urls') && (data['image_urls'] as List).isNotEmpty ? data['image_urls'][0] : '';
+                    
+                    int price = int.tryParse(data['price'].toString()) ?? 0;
+                    int salesCount = data['sales_count'] ?? 0;
+                    int productRevenue = price * salesCount;
+
                     return Card(
-                      child: ListTile(
-                        title: Text(data['product_name'] ?? 'Product', maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: Text('Price: ৳${data['price']}'),
-                        trailing: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
+                      margin: const EdgeInsets.only(bottom: 15),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(
                           children:[
-                            const Text('Sold', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                            Text('${data['sales_count']}x', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                            // প্রোডাক্ট ইমেজ
+                            Container(
+                              width: 60, height: 60, 
+                              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300)), 
+                              child: img.isNotEmpty ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(img, fit: BoxFit.cover)) : const Icon(Icons.image, color: Colors.grey)
+                            ),
+                            const SizedBox(width: 15),
+                            
+                            // ডিটেইলস
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children:[
+                                  Text(data['product_name'] ?? 'Product', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                  const SizedBox(height: 5),
+                                  Text('Unit Price: ৳$price', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                  const SizedBox(height: 5),
+                                  Text('Revenue: ৳$productRevenue', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.teal)),
+                                ],
+                              )
+                            ),
+                            
+                            // সেলস কাউন্ট ব্যাজ
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              decoration: BoxDecoration(color: Colors.deepOrange.shade50, borderRadius: BorderRadius.circular(8)),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children:[
+                                  const Text('Sold', style: TextStyle(fontSize: 10, color: Colors.black54)),
+                                  Text('${salesCount}x', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.deepOrange, fontSize: 16)),
+                                ],
+                              ),
+                            )
                           ],
                         ),
                       ),
@@ -1589,122 +2217,6 @@ class AdminSellerSalesPage extends StatelessWidget {
                 ),
               ),
             ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-// ==========================================
-// নতুন সাব-পেজ ৩: কাস্টমারের অর্ডার হিস্ট্রি (Fixed and Beautiful)
-// ==========================================
-class AdminCustomerOrdersPage extends StatelessWidget {
-  final String customerId;
-  final String customerName;
-  const AdminCustomerOrdersPage({super.key, required this.customerId, required this.customerName});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.grey.shade100,
-      appBar: AppBar(title: Text('$customerName\'s Orders', style: const TextStyle(fontSize: 16)), backgroundColor: Colors.blue, foregroundColor: Colors.white),
-      body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance.collection('orders')
-            .where('user_id', isEqualTo: customerId)
-            .orderBy('order_date', descending: true)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
-          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.remove_shopping_cart, size: 80, color: Colors.grey.shade300),
-                  const SizedBox(height: 10),
-                  const Text('এই কাস্টমার এখনো কোনো অর্ডার করেননি।', style: TextStyle(color: Colors.grey)),
-                ],
-              )
-            );
-          }
-
-          return ListView.builder(
-            padding: const EdgeInsets.all(15),
-            itemCount: snapshot.data!.docs.length,
-            itemBuilder: (context, index) {
-              var doc = snapshot.data!.docs[index];
-              var data = doc.data() as Map<String, dynamic>;
-              
-              String dateString = 'Unknown Date';
-              if (data['order_date'] != null) {
-                DateTime date = (data['order_date'] as Timestamp).toDate();
-                dateString = '${date.day}/${date.month}/${date.year} at ${date.hour > 12 ? date.hour - 12 : date.hour}:${date.minute.toString().padLeft(2, '0')} ${date.hour >= 12 ? 'PM' : 'AM'}';
-              }
-
-              String status = data['status'] ?? 'Pending';
-              Color statusColor = Colors.orange;
-              if (status == 'Delivered') statusColor = Colors.green;
-              if (status == 'Dispatched' || status == 'In-Transit') statusColor = Colors.purple;
-              if (status == 'Delivery Failed' || status == 'Cancelled') statusColor = Colors.red;
-              
-              List items = data['items'] ?? [];
-
-              return Card(
-                margin: const EdgeInsets.only(bottom: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                child: Padding(
-                  padding: const EdgeInsets.all(15),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children:[
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children:[
-                          Text('ID: #${doc.id.substring(0, 8).toUpperCase()}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(color: statusColor.withOpacity(0.1), borderRadius: BorderRadius.circular(20)),
-                            child: Text(status, style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 11)),
-                          )
-                        ],
-                      ),
-                      const SizedBox(height: 5),
-                      Text('Placed: $dateString', style: const TextStyle(fontSize: 11, color: Colors.grey)),
-                      const Divider(height: 20),
-                      
-                      // 🔴 Ordered Items List
-                      ...items.map((item) => Padding(
-                        padding: const EdgeInsets.only(bottom: 8.0),
-                        child: Row(
-                          children: [
-                            Container(width: 40, height: 40, decoration: BoxDecoration(borderRadius: BorderRadius.circular(5), image: DecorationImage(image: NetworkImage(item['image_url'] ?? ''), fit: BoxFit.cover))),
-                            const SizedBox(width: 10),
-                            Expanded(child: Text('${item['quantity']}x ${item['product_name']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13))),
-                            Text('৳${item['price']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                          ],
-                        ),
-                      )).toList(),
-                      
-                      const Divider(height: 20),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children:[
-                          Row(
-                            children: [
-                              Icon(Icons.payment, size: 16, color: Colors.grey.shade600),
-                              const SizedBox(width: 5),
-                              Text(data['payment_method'] ?? 'COD', style: const TextStyle(color: Colors.blueGrey, fontSize: 12, fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                          Text('Total: ৳${data['total_amount']}', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 16)),
-                        ],
-                      )
-                    ],
-                  ),
-                ),
-              );
-            }
           );
         },
       ),
@@ -2497,7 +3009,7 @@ class _AdminFinanceReportsState extends State<AdminFinanceReports> {
 }
 
 // ==========================================
-// অ্যাডমিন পেজ ৫: System Settings & Admin (With Promo Control)
+// অ্যাডমিন পেজ ৫: System Settings & Admin (Updated Profile & Roles)
 // ==========================================
 class AdminSettings extends StatefulWidget {
   const AdminSettings({super.key});
@@ -2521,7 +3033,18 @@ class _AdminSettingsState extends State<AdminSettings> {
     });
   }
 
+  // প্রোফাইল ছবি আপলোড
   Future<void> _uploadAdminProfilePicture() async {
+    await _uploadImage('profile_image_url', 'profile_pictures', 'admin_profile');
+  }
+
+  // কাভার ছবি আপলোড
+  Future<void> _uploadAdminCoverPicture() async {
+    await _uploadImage('cover_image_url', 'cover_pictures', 'admin_cover');
+  }
+
+  // ছবি আপলোডের কমন ফাংশন
+  Future<void> _uploadImage(String dbField, String folderName, String filePrefix) async {
     User? currentUser = FirebaseAuth.instance.currentUser;
     final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 1080);
     if (image == null || currentUser == null) return;
@@ -2529,8 +3052,8 @@ class _AdminSettingsState extends State<AdminSettings> {
     try {
       showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
       
-      String fileName = 'admin_profile_${currentUser.uid}_${DateTime.now().millisecondsSinceEpoch}';
-      Reference ref = FirebaseStorage.instance.ref().child('profile_pictures').child(fileName);
+      String fileName = '${filePrefix}_${currentUser.uid}_${DateTime.now().millisecondsSinceEpoch}';
+      Reference ref = FirebaseStorage.instance.ref().child(folderName).child(fileName);
       
       if (kIsWeb) {
         Uint8List bytes = await image.readAsBytes();
@@ -2541,12 +3064,12 @@ class _AdminSettingsState extends State<AdminSettings> {
       
       String downloadUrl = await ref.getDownloadURL();
       
-      await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({'profile_image_url': downloadUrl});
-      await _logAdminAction('Profile Update', 'Admin updated their profile picture.');
+      await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({dbField: downloadUrl});
+      await _logAdminAction('Image Update', 'Admin updated their $dbField.');
 
       if (!mounted) return;
       Navigator.pop(context); 
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Admin profile picture updated! 🎉')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Image updated successfully! 🎉')));
     } catch (e) {
       if (!mounted) return;
       Navigator.pop(context);
@@ -2554,9 +3077,165 @@ class _AdminSettingsState extends State<AdminSettings> {
     }
   }
 
+  // সুপার অ্যাডমিন কর্তৃক রোল এবং পদবি (Designation) সেট করার পপ-আপ
+  void _showRoleManagementDialog() {
+    TextEditingController phoneCtrl = TextEditingController();
+    TextEditingController? autocompleteCtrl; // Autocomplete এর ডাটা ধরার জন্য
+    String selectedRole = 'admin'; 
+
+    // আপনার দেওয়া এবং সম্ভাব্য সব পদবির লিস্ট
+    final List<String> designationOptions =[
+      'Customer Support Executive',
+      'Operations Assistant',
+      'Seller Acquisition Officer',
+      'Field Executive',
+      'Logistics Manager',
+      'Delivery Coordinator',
+      'Operations Manager',
+      'General Manager',
+      'Super Admin',
+      'Staff Admin',
+      'Delivery Boy',
+    ];
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Assign Role & Position'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children:[
+                  // ১. ইমেইলের বদলে ফোন নাম্বার ইনপুট
+                  TextField(
+                    controller: phoneCtrl, 
+                    keyboardType: TextInputType.phone,
+                    decoration: const InputDecoration(
+                      labelText: 'User Phone Number', 
+                      prefixText: '+88 ', // অটোমেটিক +88 দেখাবে
+                      border: OutlineInputBorder(), 
+                      isDense: true
+                    )
+                  ),
+                  const SizedBox(height: 15),
+                  
+                  // ২. রোল সিলেক্ট করার ড্রপডাউন
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedRole,
+                    decoration: const InputDecoration(labelText: 'Assign Role', border: OutlineInputBorder(), isDense: true),
+                    items:['super_admin', 'admin', 'seller', 'rider', 'customer'].map((r) => DropdownMenuItem(value: r, child: Text(r.toUpperCase()))).toList(),
+                    onChanged: (val) => setDialogState(() => selectedRole = val!),
+                  ),
+                  const SizedBox(height: 15),
+                  
+                  // ৩. টাইপ + ড্রপডাউন (Autocomplete)
+                  Autocomplete<String>(
+                    optionsBuilder: (TextEditingValue textEditingValue) {
+                      // যদি বক্স ফাঁকা থাকে, সব অপশন দেখাবে। না হলে টাইপ করার সাথে মিলিয়ে দেখাবে।
+                      if (textEditingValue.text == '') {
+                        return designationOptions;
+                      }
+                      return designationOptions.where((String option) {
+                        return option.toLowerCase().contains(textEditingValue.text.toLowerCase());
+                      });
+                    },
+                    fieldViewBuilder: (context, textEditingController, focusNode, onFieldSubmitted) {
+                      // এই কন্ট্রোলারটি বাইরের ভেরিয়েবলে সেভ রাখছি যাতে বাটন চাপলে ডাটা নিতে পারি
+                      autocompleteCtrl = textEditingController;
+                      return TextField(
+                        controller: textEditingController,
+                        focusNode: focusNode,
+                        decoration: const InputDecoration(
+                          labelText: 'Job Title / Designation', 
+                          hintText: 'Type or select from list', 
+                          border: OutlineInputBorder(), 
+                          isDense: true,
+                          suffixIcon: Icon(Icons.arrow_drop_down, color: Colors.grey),
+                        )
+                      );
+                    },
+                    optionsViewBuilder: (context, onSelected, options) {
+                      return Align(
+                        alignment: Alignment.topLeft,
+                        child: Material(
+                          elevation: 4.0,
+                          borderRadius: BorderRadius.circular(8),
+                          child: SizedBox(
+                            width: 250, // ড্রপডাউনের সাইজ
+                            height: 200,
+                            child: ListView.builder(
+                              padding: EdgeInsets.zero,
+                              itemCount: options.length,
+                              itemBuilder: (BuildContext context, int index) {
+                                final String option = options.elementAt(index);
+                                return ListTile(
+                                  title: Text(option, style: const TextStyle(fontSize: 14)),
+                                  onTap: () => onSelected(option),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 5),
+                  const Text('লিস্ট থেকে সিলেক্ট করুন অথবা নতুন টাইপ করুন। এটি অ্যাপের উপরে D Shop এর পাশে দেখাবে।', style: TextStyle(fontSize: 10, color: Colors.grey))
+                ],
+              ),
+            ),
+            actions:[
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                onPressed: () async {
+                  if(phoneCtrl.text.isEmpty) return;
+                  
+                  // ফোন নাম্বার ফায়ারবেসের ফরম্যাটে সাজানো
+                  String targetPhone = phoneCtrl.text.trim();
+                  if (!targetPhone.startsWith('+88')) {
+                    targetPhone = '+88$targetPhone';
+                  }
+                  
+                  showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+                  
+                  // ফোন নাম্বার দিয়ে ডাটাবেসে ইউজার খোঁজা
+                  var snap = await FirebaseFirestore.instance.collection('users').where('phone', isEqualTo: targetPhone).get();
+                  
+                  if (!mounted) return;
+                  Navigator.pop(context); // লোডিং বন্ধ
+
+                  if(snap.docs.isNotEmpty) {
+                    String finalDesignation = autocompleteCtrl?.text.trim() ?? '';
+                    
+                    Map<String, dynamic> updateData = {'role': selectedRole};
+                    if (finalDesignation.isNotEmpty) {
+                      updateData['designation'] = finalDesignation;
+                    }
+
+                    await snap.docs.first.reference.update(updateData);
+                    await _logAdminAction('Role/Position Change', 'Updated $targetPhone as $selectedRole ($finalDesignation)');
+
+                    if(mounted) Navigator.pop(context); // ডায়ালগ বন্ধ
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Role and Position updated successfully! ✅')));
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('এই ফোন নাম্বারের কোনো ইউজার পাওয়া যায়নি! ❌'), backgroundColor: Colors.red));
+                  }
+                }, 
+                child: const Text('Update User', style: TextStyle(color: Colors.white))
+              )
+            ],
+          );
+        }
+      )
+    );
+  }
+
+  // App Config Dialog
   void _showAppConfigDialog() {
     TextEditingController commissionCtrl = TextEditingController();
-    
     FirebaseFirestore.instance.collection('app_config').doc('finance_settings').get().then((doc) {
       if (doc.exists) commissionCtrl.text = (doc['platform_commission'] ?? 10).toString();
     });
@@ -2572,8 +3251,6 @@ class _AdminSettingsState extends State<AdminSettings> {
             const Text('Set Platform Commission (%)', style: TextStyle(fontSize: 12, color: Colors.grey)),
             const SizedBox(height: 5),
             TextField(controller: commissionCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(hintText: 'e.g. 10', border: OutlineInputBorder(), isDense: true)),
-            const SizedBox(height: 10),
-            const Text('*This % will be deducted from seller payouts.', style: TextStyle(fontSize: 10, color: Colors.deepOrange)),
           ],
         ),
         actions:[
@@ -2585,11 +3262,8 @@ class _AdminSettingsState extends State<AdminSettings> {
               await FirebaseFirestore.instance.collection('app_config').doc('finance_settings').set({
                 'platform_commission': double.tryParse(newVal) ?? 10.0,
               }, SetOptions(merge: true));
-              
-              await _logAdminAction('Commission Update', 'Platform commission changed to $newVal%');
-
               if(mounted) Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Commission Rate Updated Successfully!')));
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Commission Rate Updated!')));
             }, 
             child: const Text('Save', style: TextStyle(color: Colors.white))
           )
@@ -2598,9 +3272,6 @@ class _AdminSettingsState extends State<AdminSettings> {
     );
   }
 
-  // =====================================
-  // [NEW] ফার্স্ট টাইম প্রোমো এবং জালিয়াতি রোধ কন্ট্রোলার
-  // =====================================
   void _showPromoSettingsDialog() {
     TextEditingController discountCtrl = TextEditingController();
     bool isActive = false;
@@ -2636,8 +3307,6 @@ class _AdminSettingsState extends State<AdminSettings> {
                     enabled: isActive,
                     decoration: const InputDecoration(labelText: 'Discount Percentage (%)', hintText: 'e.g. 50', border: OutlineInputBorder(), isDense: true)
                   ),
-                  const SizedBox(height: 10),
-                  const Text('⚠️ Anti-Fraud System Active:\nএই ডিসকাউন্টটি শুধুমাত্র একজন ইউজারের প্রথম অর্ডারে কাজ করবে। আমাদের সিস্টেম ডিভাইস আইডি (Device MAC) ট্র্যাক করে, তাই নতুন সিম কিনে লগিন করলেও একই মোবাইল থেকে দ্বিতীয়বার অফার নেওয়া যাবে না!', style: TextStyle(fontSize: 10, color: Colors.grey)),
                 ],
               ),
               actions:[
@@ -2665,191 +3334,174 @@ class _AdminSettingsState extends State<AdminSettings> {
     });
   }
 
-  void _showRoleManagementDialog() {
-    TextEditingController emailCtrl = TextEditingController();
-    String selectedRole = 'admin'; 
-
-    showDialog(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          return AlertDialog(
-            title: const Text('Change User Role'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children:[
-                TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: 'User Email Address', border: OutlineInputBorder(), isDense: true)),
-                const SizedBox(height: 15),
-                DropdownButtonFormField<String>(
-                  initialValue: selectedRole,
-                  decoration: const InputDecoration(labelText: 'Assign New Role', border: OutlineInputBorder(), isDense: true),
-                  items:['super_admin', 'admin', 'seller', 'rider', 'customer'].map((r) => DropdownMenuItem(value: r, child: Text(r.toUpperCase()))).toList(),
-                  onChanged: (val) => setDialogState(() => selectedRole = val!),
-                )
-              ],
-            ),
-            actions:[
-              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
-                onPressed: () async {
-                  if(emailCtrl.text.isEmpty) return;
-                  String targetEmail = emailCtrl.text.trim();
-                  
-                  var snap = await FirebaseFirestore.instance.collection('users').where('email', isEqualTo: targetEmail).get();
-                  if(snap.docs.isNotEmpty) {
-                    await snap.docs.first.reference.update({'role': selectedRole});
-                    await _logAdminAction('Role Change', 'Changed role of $targetEmail to $selectedRole');
-
-                    if(mounted) Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Role updated to ${selectedRole.toUpperCase()} successfully!')));
-                  } else {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User not found with this email!')));
-                  }
-                }, 
-                child: const Text('Update Role', style: TextStyle(color: Colors.white))
-              )
-            ],
-          );
-        }
-      )
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     User? currentUser = FirebaseAuth.instance.currentUser;
 
-    return Scaffold(
-      backgroundColor: Colors.grey.shade50,
-      appBar: AppBar(backgroundColor: Colors.deepOrange, title: const Text('D Shop ADMIN', style: TextStyle(color: Colors.white)), centerTitle: true),
-      body: SingleChildScrollView(
-        child: Column(
-          children:[
-            StreamBuilder<DocumentSnapshot>(
-              stream: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) return const SizedBox(height: 150, child: Center(child: CircularProgressIndicator()));
-                
-                var data = snapshot.hasData && snapshot.data!.exists ? snapshot.data!.data() as Map<String, dynamic> : {};
-                String name = data['name'] ?? 'Admin';
-                String role = data['role'] ?? 'admin';
-                String img = data.containsKey('profile_image_url') ? data['profile_image_url'] : '';
-                
-                bool isSuperAdmin = role == 'super_admin';
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).snapshots(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        
+        var data = snapshot.hasData && snapshot.data!.exists ? snapshot.data!.data() as Map<String, dynamic> : {};
+        String name = data['name'] ?? 'Admin';
+        String role = data['role'] ?? 'admin';
+        String img = data['profile_image_url'] ?? '';
+        String coverImg = data['cover_image_url'] ?? ''; 
+        String designation = data['designation'] ?? 'STAFF'; 
+        
+        bool isSuperAdmin = role == 'super_admin';
 
-                return Column(
-                  children:[
-                    Container(
-                      width: double.infinity, padding: const EdgeInsets.all(20), decoration: const BoxDecoration(color: Colors.white), 
-                      child: Column(
-                        children:[
-                          Stack(
-                            alignment: Alignment.bottomRight,
-                            children:[
-                              CircleAvatar(
-                                radius: 45, backgroundColor: Colors.deepPurple.shade50,
-                                backgroundImage: img.isNotEmpty ? NetworkImage(img) : null,
-                                child: img.isEmpty ? const Icon(Icons.admin_panel_settings, size: 50, color: Colors.deepPurple) : null,
-                              ),
-                              InkWell(
-                                onTap: _uploadAdminProfilePicture,
-                                child: Container(
-                                  padding: const EdgeInsets.all(6),
-                                  decoration: const BoxDecoration(color: Colors.deepOrange, shape: BoxShape.circle),
-                                  child: const Icon(Icons.camera_alt, color: Colors.white, size: 16)
-                                ),
-                              )
-                            ],
-                          ),
-                          const SizedBox(height: 15), 
-                          Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), 
-                          Container(
-                            margin: const EdgeInsets.only(top: 5),
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: isSuperAdmin ? Colors.deepOrange.shade100 : Colors.blue.shade100,
-                              borderRadius: BorderRadius.circular(10)
-                            ),
-                            child: Text(isSuperAdmin ? 'SUPER ADMIN' : 'STAFF ADMIN', style: TextStyle(color: isSuperAdmin ? Colors.deepOrange : Colors.blue, fontSize: 10, fontWeight: FontWeight.bold)),
-                          )
-                        ]
-                      )
-                    ),
-                    
-                    Padding(
-                      padding: const EdgeInsets.all(15.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children:[
-                          const Text('Control Center', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 10),
-                          
-                          _buildSettingItem(Icons.store, 'Store Details', onTap: () {
-                            Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminStoreDetailsPage()));
-                          }),
-                          _buildSettingItem(Icons.people, 'Customer & Staff List', trailingText: 'View', onTap: () {
-                             Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminUserStatusPage(role: 'admin', title: 'Staff & Admins')));
-                          }),
-                          
-                          if (isSuperAdmin) ...[
-                            const SizedBox(height: 20),
-                            const Text('Super Admin Privileges', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
-                            const SizedBox(height: 10),
-                            
-                            // [NEW] প্রোমো সেটিংস যুক্ত করা হলো
-                            _buildSettingItem(Icons.local_offer, 'First-Time Promo Settings', trailingText: 'Setup', onTap: _showPromoSettingsDialog),
-                            _buildSettingItem(Icons.admin_panel_settings, 'Global App Settings (COD)', trailingText: 'Live', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminGlobalSettingsPage()))),
-                            
-                            _buildSettingItem(Icons.settings_applications, 'App Config (Commission)', onTap: _showAppConfigDialog),
-                            _buildSettingItem(Icons.admin_panel_settings, 'Role Management', onTap: _showRoleManagementDialog),
-                            _buildSettingItem(Icons.security, 'Security Log', onTap: () {
-                               Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminSecurityLogPage()));
-                            }),
-                          ],
-                          
-                          if (!isSuperAdmin) ...[
-                            const SizedBox(height: 20),
-                            Container(
-                              padding: const EdgeInsets.all(15),
-                              decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red.shade100)),
-                              child: Row(
-                                children: const[
-                                  Icon(Icons.lock, color: Colors.redAccent),
-                                  SizedBox(width: 10),
-                                  Expanded(child: Text('You are logged in as a Staff Admin. Some sensitive settings are hidden from your account.', style: TextStyle(color: Colors.redAccent, fontSize: 12))),
-                                ],
-                              ),
-                            )
-                          ],
-
-                          const SizedBox(height: 30),
-                          SizedBox(
-                            width: double.infinity, 
-                            child: TextButton.icon(
-                              onPressed: () {
-                                Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginPage()), (route) => false);
-                                Future.microtask(() async {
-                                  await NotificationService.syncFcmTopics('guest');
-                                  SharedPreferences prefs = await SharedPreferences.getInstance();
-                                  await prefs.clear();
-                                  await FirebaseAuth.instance.signOut();
-                                });
-                              },
-                              icon: const Icon(Icons.logout, color: Colors.red),
-                              label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold))
-                            )
-                          )
-                        ],
+        return Scaffold(
+          backgroundColor: Colors.grey.shade50,
+          appBar: AppBar(
+            backgroundColor: Colors.deepOrange, 
+            title: Text('D Shop ${designation.toUpperCase()}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), 
+            centerTitle: true
+          ),
+          body: SingleChildScrollView(
+            child: Column(
+              children:[
+                // [FIXED] প্রোফাইল ও কাভার ছবির লেআউট ঠিক করা হয়েছে যাতে ক্লিক মিস না হয়
+                SizedBox(
+                  height: 230,
+                  child: Stack(
+                    alignment: Alignment.topCenter,
+                    children:[
+                      // Cover Photo Background
+                      Container(
+                        height: 160,
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade300,
+                          image: coverImg.isNotEmpty 
+                              ? DecorationImage(image: NetworkImage(coverImg), fit: BoxFit.cover) 
+                              : null,
+                        ),
+                        child: coverImg.isEmpty ? const Center(child: Icon(Icons.wallpaper, size: 50, color: Colors.grey)) : null,
                       ),
-                    )
-                  ],
-                );
-              }
+                      // Edit Cover Button
+                      Positioned(
+                        top: 10, right: 10,
+                        child: InkWell(
+                          onTap: _uploadAdminCoverPicture,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
+                            child: Row(children: const[Icon(Icons.edit, color: Colors.white, size: 14), SizedBox(width: 5), Text('Cover', style: TextStyle(color: Colors.white, fontSize: 12))]),
+                          ),
+                        ),
+                      ),
+                      // Profile Picture overlapping the cover
+                      Positioned(
+                        top: 100, // 160 (cover height) - 60 (half of profile pic)
+                        child: Stack(
+                          alignment: Alignment.bottomRight,
+                          children:[
+                            Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                              child: CircleAvatar(
+                                radius: 55, backgroundColor: Colors.deepPurple.shade50,
+                                backgroundImage: img.isNotEmpty ? NetworkImage(img) : null,
+                                child: img.isEmpty ? const Icon(Icons.person, size: 50, color: Colors.deepPurple) : null,
+                              ),
+                            ),
+                            InkWell(
+                              onTap: _uploadAdminProfilePicture,
+                              child: Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(color: Colors.deepOrange, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2)),
+                                child: const Icon(Icons.camera_alt, color: Colors.white, size: 18)
+                              ),
+                            )
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                
+                // Name Section
+                Text(name, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), 
+                const SizedBox(height: 5),
+                
+                Padding(
+                  padding: const EdgeInsets.all(15.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children:[
+                      const Text('Control Center', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 10),
+                      
+                      _buildSettingItem(Icons.person_pin, 'My Profile Details', onTap: () {
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminProfileDetailsPage()));
+                      }),
+
+                      _buildSettingItem(Icons.how_to_reg, 'Onboard Seller & Rider', trailingText: 'Verify', onTap: () {
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminOnboardUserPage()));
+                      }),
+                      
+                      if (isSuperAdmin)
+                        _buildSettingItem(Icons.people, 'Customer & Staff List', trailingText: 'View', onTap: () {
+                           Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminUserStatusPage(role: 'admin', title: 'Staff & Admins')));
+                        }),
+                      
+                      if (isSuperAdmin) ...[
+                        const SizedBox(height: 20),
+                        const Text('Super Admin Privileges', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                        const SizedBox(height: 10),
+                        
+                        _buildSettingItem(Icons.analytics, 'Marketing & Analytics (Charts)', trailingText: 'Live', onTap: () {
+                          Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminAnalyticsDashboard()));
+                        }),
+                        _buildSettingItem(Icons.local_offer, 'First-Time Promo Settings', trailingText: 'Setup', onTap: _showPromoSettingsDialog),
+                        _buildSettingItem(Icons.admin_panel_settings, 'Global App Settings (COD)', trailingText: 'Live', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminGlobalSettingsPage()))),
+                        _buildSettingItem(Icons.settings_applications, 'App Config (Commission)', onTap: _showAppConfigDialog),
+                        
+                        _buildSettingItem(Icons.badge, 'Assign Roles & Positions', onTap: _showRoleManagementDialog),
+                        
+                        _buildSettingItem(Icons.security, 'Security Log', onTap: () {
+                           Navigator.push(context, MaterialPageRoute(builder: (context) => const AdminSecurityLogPage()));
+                        }),
+                      ],
+
+                      // [REMOVED] আপনার নির্দেশমতো লাল রঙের অ্যালার্ট বক্সটি মুছে দেওয়া হয়েছে
+
+                      // [MOVED DOWN] লগ-আউট বাটনটি অনেক নিচে নামানো হয়েছে
+                      const SizedBox(height: 100), 
+                      SizedBox(
+                        width: double.infinity, 
+                        child: TextButton.icon(
+                          onPressed: () async {
+                            // 1. লোকাল ক্যাশ ক্লিয়ার করা
+                            SharedPreferences prefs = await SharedPreferences.getInstance();
+                            await prefs.clear();
+                            
+                            // 2. ফায়ারবেস থেকে সাইন আউট করা
+                            await FirebaseAuth.instance.signOut(); 
+                            
+                            // 3. [FIXED] লগ-আউট হওয়ার পর লগিন পেজে পাঠিয়ে দেওয়া এবং পেছনের সব পেজ রিমুভ করা
+                            if (context.mounted) {
+                              Navigator.pushAndRemoveUntil(
+                                context, 
+                                MaterialPageRoute(builder: (context) => const LoginPage()), 
+                                (route) => false,
+                              );
+                            }
+                          }, 
+                          icon: const Icon(Icons.logout, color: Colors.red),
+                          label: const Text('Log Out', style: TextStyle(color: Colors.red, fontSize: 18, fontWeight: FontWeight.bold))
+                        )
+                      )
+                    ],
+                  ),
+                )
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      }
     );
   }
 
@@ -2861,6 +3513,70 @@ class _AdminSettingsState extends State<AdminSettings> {
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
         trailing: trailingText != null ? Text(trailingText, style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)) : const Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey),
         onTap: onTap,
+      ),
+    );
+  }
+}
+
+// ==========================================
+// [UPDATED] User Profile Details Page (Self Fetching Data)
+// ==========================================
+class AdminProfileDetailsPage extends StatelessWidget {
+  const AdminProfileDetailsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    User? currentUser = FirebaseAuth.instance.currentUser;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('My Profile Details', style: TextStyle(color: Colors.white)),
+        backgroundColor: Colors.deepOrange,
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: StreamBuilder<DocumentSnapshot>(
+        stream: FirebaseFirestore.instance.collection('users').doc(currentUser?.uid).snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (!snapshot.hasData || !snapshot.data!.exists) {
+            return const Center(child: Text('User data not found!'));
+          }
+
+          var userData = snapshot.data!.data() as Map<String, dynamic>;
+
+          return ListView(
+            padding: const EdgeInsets.all(20),
+            children:[
+              const Text('Personal Information', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 15),
+              ListTile(
+                tileColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                leading: const Icon(Icons.person, color: Colors.teal),
+                title: const Text('Full Name'), subtitle: Text(userData['name'] ?? 'N/A'),
+              ),
+              const SizedBox(height: 10),
+              ListTile(
+                tileColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                leading: const Icon(Icons.email, color: Colors.blue),
+                title: const Text('Email Address'), subtitle: Text(userData['email'] ?? 'N/A'),
+              ),
+              const SizedBox(height: 10),
+              ListTile(
+                tileColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                leading: const Icon(Icons.phone, color: Colors.green),
+                title: const Text('Phone Number'), subtitle: Text(userData['phone'] ?? 'N/A'),
+              ),
+              const SizedBox(height: 10),
+              ListTile(
+                tileColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                leading: const Icon(Icons.work, color: Colors.orange),
+                title: const Text('Designation / Position'), subtitle: Text(userData['designation'] ?? 'Staff'),
+              ),
+            ],
+          );
+        }
       ),
     );
   }
@@ -5640,6 +6356,267 @@ class _AdminManualOrderPageState extends State<AdminManualOrderPage> {
           const Divider(height: 25),
           ...children
         ],
+      ),
+    );
+  }
+}
+
+class AdminAnalyticsDashboard extends StatelessWidget {
+  const AdminAnalyticsDashboard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    DateTime sevenDaysAgo = DateTime.now().subtract(const Duration(days: 7));
+
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(title: const Text('Marketing & Analytics', style: TextStyle(color: Colors.white)), backgroundColor: Colors.deepPurple, iconTheme: const IconThemeData(color: Colors.white)),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children:[
+            const Text('Last 7 Days Orders (By Area)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            // Bar Chart (এলাকা ভিত্তিক সেলস)
+            Container(
+              height: 250, padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), boxShadow:[BoxShadow(color: Colors.grey.shade300, blurRadius: 10)]),
+              child: StreamBuilder<QuerySnapshot>(
+                stream: FirebaseFirestore.instance.collection('orders').where('order_date', isGreaterThanOrEqualTo: sevenDaysAgo).snapshots(),
+                builder: (context, snapshot) {
+                  if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+                  
+                  Map<String, int> areaCount = {};
+                  for (var doc in snapshot.data!.docs) {
+                    String address = (doc.data() as Map<String, dynamic>)['shipping_address_text'] ?? '';
+                    // ঠিকানার কমা (,) দিয়ে ভাগ করে এলাকার নাম বের করা
+                    List<String> parts = address.split(',');
+                    String area = parts.length > 1 ? parts[1].trim().split(' ')[0] : 'Others'; 
+                    areaCount[area] = (areaCount[area] ?? 0) + 1;
+                  }
+
+                  List<BarChartGroupData> barGroups =[];
+                  int x = 0;
+                  areaCount.forEach((key, value) {
+                    barGroups.add(BarChartGroupData(x: x, barRods:[BarChartRodData(toY: value.toDouble(), color: Colors.deepOrange, width: 15, borderRadius: BorderRadius.circular(4))]));
+                    x++;
+                  });
+
+                  return BarChart(
+                    BarChartData(
+                      barGroups: barGroups,
+                      borderData: FlBorderData(show: false),
+                      titlesData: FlTitlesData(
+                        bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, getTitlesWidget: (value, meta) {
+                          if (value.toInt() >= areaCount.keys.length) return const Text('');
+                          return Text(areaCount.keys.elementAt(value.toInt()), style: const TextStyle(fontSize: 10));
+                        })),
+                        topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      )
+                    )
+                  );
+                }
+              ),
+            ),
+            
+            const SizedBox(height: 30),
+            const Text('Most Viewed Categories (Interest)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            
+            // Pie Chart (কোন ক্যাটাগরি বেশি দেখছে)
+            Container(
+              height: 250, padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), boxShadow:[BoxShadow(color: Colors.grey.shade300, blurRadius: 10)]),
+              child: StreamBuilder<QuerySnapshot>(
+                stream: FirebaseFirestore.instance.collection('analytics_data').where('event', isEqualTo: 'view_item').limit(100).snapshots(),
+                builder: (context, snapshot) {
+                  if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+                  
+                  Map<String, int> catCount = {};
+                  for (var doc in snapshot.data!.docs) {
+                    String cat = (doc.data() as Map<String, dynamic>)['category'] ?? 'Unknown';
+                    catCount[cat] = (catCount[cat] ?? 0) + 1;
+                  }
+
+                  List<PieChartSectionData> pieSections =[];
+                  List<Color> colors =[Colors.blue, Colors.red, Colors.green, Colors.orange, Colors.purple, Colors.teal];
+                  int i = 0;
+                  
+                  catCount.forEach((key, value) {
+                    pieSections.add(PieChartSectionData(value: value.toDouble(), title: key, color: colors[i % colors.length], radius: 60, titleStyle: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)));
+                    i++;
+                  });
+
+                  return PieChart(PieChartData(sections: pieSections, centerSpaceRadius: 40));
+                }
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+// ==========================================
+// [NEW] Seller & Rider Onboarding Page (By Admin/Staff)
+// ==========================================
+class AdminOnboardUserPage extends StatefulWidget {
+  const AdminOnboardUserPage({super.key});
+
+  @override
+  State<AdminOnboardUserPage> createState() => _AdminOnboardUserPageState();
+}
+
+class _AdminOnboardUserPageState extends State<AdminOnboardUserPage> {
+  final TextEditingController phoneCtrl = TextEditingController();
+  String selectedRole = 'seller'; 
+  
+  final ImagePicker _picker = ImagePicker();
+  XFile? nidImage;
+  XFile? licenseImage;
+
+  Future<void> _pickImage(bool isNid) async {
+    final XFile? img = await _picker.pickImage(source: ImageSource.camera, imageQuality: 60);
+    if (img != null) {
+      setState(() {
+        if (isNid) nidImage = img;
+        else licenseImage = img;
+      });
+    }
+  }
+
+  Future<void> _submitOnboarding() async {
+    if (phoneCtrl.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ফোন নাম্বার দিন!')));
+      return;
+    }
+    if (nidImage == null || licenseImage == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('NID এবং লাইসেন্সের ছবি তোলা বাধ্যতামূলক!')));
+      return;
+    }
+
+    String targetPhone = phoneCtrl.text.trim();
+    if (!targetPhone.startsWith('+88')) targetPhone = '+88$targetPhone';
+
+    showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+    try {
+      // ১. ইউজার খোঁজা
+      var snap = await FirebaseFirestore.instance.collection('users').where('phone', isEqualTo: targetPhone).get();
+      if (snap.docs.isEmpty) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('এই নাম্বারে কোনো কাস্টমার একাউন্ট নেই! আগে কাস্টমার অ্যাপ থেকে সাইনআপ করতে বলুন।'), backgroundColor: Colors.red));
+        return;
+      }
+      
+      var userDoc = snap.docs.first;
+      String uid = userDoc.id;
+
+      // ২. ছবি আপলোড করা
+      Reference nidRef = FirebaseStorage.instance.ref().child('legal_docs').child('nid_$uid.jpg');
+      await nidRef.putFile(File(nidImage!.path));
+      String nidUrl = await nidRef.getDownloadURL();
+
+      Reference licenseRef = FirebaseStorage.instance.ref().child('legal_docs').child('license_$uid.jpg');
+      await licenseRef.putFile(File(licenseImage!.path));
+      String licenseUrl = await licenseRef.getDownloadURL();
+
+      // ৩. ডাটাবেস আপডেট এবং কে এপ্রুভ করেছে তার রেকর্ড রাখা
+      User? currentAdmin = FirebaseAuth.instance.currentUser;
+      
+      await userDoc.reference.update({
+        'role': selectedRole,
+        'status': 'approved', // সরাসরি এপ্রুভ হয়ে যাবে
+        'nid_url': nidUrl,
+        'license_url': licenseUrl,
+        'approved_by_email': currentAdmin?.email ?? 'Unknown Admin', // 👈 কে এপ্রুভ করলো তার রেকর্ড
+        'approved_at': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      Navigator.pop(context);
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('সফলভাবে $targetPhone কে ${selectedRole.toUpperCase()} বানানো হয়েছে! ✅'), backgroundColor: Colors.green));
+
+    } catch (e) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Verify & Onboard User', style: TextStyle(color: Colors.white)), backgroundColor: Colors.teal, iconTheme: const IconThemeData(color: Colors.white)),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children:[
+            const Text('Upgrade Customer to Seller/Rider', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 5),
+            const Text('ইউজারের কাস্টমার একাউন্টের ফোন নাম্বার দিয়ে তাকে সেলার বা রাইডার হিসেবে এপ্রুভ করুন।', style: TextStyle(color: Colors.grey, fontSize: 12)),
+            const SizedBox(height: 25),
+
+            TextField(
+              controller: phoneCtrl, keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Customer Phone Number', prefixText: '+88 ', border: OutlineInputBorder(), prefixIcon: Icon(Icons.phone)),
+            ),
+            const SizedBox(height: 15),
+
+            DropdownButtonFormField<String>(
+              value: selectedRole,
+              decoration: const InputDecoration(labelText: 'Select New Role', border: OutlineInputBorder()),
+              items: const[
+                DropdownMenuItem(value: 'seller', child: Text('SELLER (মার্চেন্ট)')),
+                DropdownMenuItem(value: 'rider', child: Text('RIDER (ডেলিভারি ম্যান)')),
+              ],
+              onChanged: (val) => setState(() => selectedRole = val!),
+            ),
+            const SizedBox(height: 25),
+
+            const Text('Legal Documents (Mandatory)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const SizedBox(height: 10),
+            
+            Row(
+              children:[
+                Expanded(
+                  child: InkWell(
+                    onTap: () => _pickImage(true),
+                    child: Container(
+                      height: 100, decoration: BoxDecoration(color: Colors.grey.shade100, border: Border.all(color: Colors.grey), borderRadius: BorderRadius.circular(10)),
+                      child: nidImage != null ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.file(File(nidImage!.path), fit: BoxFit.cover)) : Column(mainAxisAlignment: MainAxisAlignment.center, children: const[Icon(Icons.camera_alt, color: Colors.teal), SizedBox(height: 5), Text('Capture NID', style: TextStyle(fontSize: 12))]),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 15),
+                Expanded(
+                  child: InkWell(
+                    onTap: () => _pickImage(false),
+                    child: Container(
+                      height: 100, decoration: BoxDecoration(color: Colors.grey.shade100, border: Border.all(color: Colors.grey), borderRadius: BorderRadius.circular(10)),
+                      child: licenseImage != null ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.file(File(licenseImage!.path), fit: BoxFit.cover)) : Column(mainAxisAlignment: MainAxisAlignment.center, children:[const Icon(Icons.camera_alt, color: Colors.blue), const SizedBox(height: 5), Text(selectedRole == 'seller' ? 'Trade License' : 'Driving License', style: const TextStyle(fontSize: 12))]),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 30),
+
+            SizedBox(
+              width: double.infinity, height: 50,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                onPressed: _submitOnboarding, 
+                icon: const Icon(Icons.verified_user, color: Colors.white),
+                label: const Text('VERIFY & UPGRADE ROLE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+              ),
+            )
+          ],
+        ),
       ),
     );
   }

@@ -402,7 +402,7 @@ class _SignupPageState extends State<SignupPage> {
 }
 
 // ==========================================
-// ২. Profile Completion Screen (নতুন ইউজারের জন্য)
+// ৩. Profile Completion Screen (শুধুমাত্র কাস্টমার হিসেবে সেভ হবে)
 // ==========================================
 class CompleteProfileScreen extends StatefulWidget {
   const CompleteProfileScreen({super.key});
@@ -413,22 +413,10 @@ class CompleteProfileScreen extends StatefulWidget {
 
 class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
   final TextEditingController nameController = TextEditingController(); 
-  final TextEditingController shopNameController = TextEditingController(); 
-  
-  String selectedRole = 'customer'; 
-  LatLng? vendorLocation; 
 
   void saveProfile() async {
     if (nameController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('আপনার নাম দিন!')));
-      return;
-    }
-    if (selectedRole == 'seller' && shopNameController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('সেলার হিসেবে আপনার শপের নাম দেওয়া বাধ্যতামূলক!')));
-      return;
-    }
-    if (selectedRole != 'customer' && vendorLocation == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ম্যাপে লোকেশন সেট করা বাধ্যতামূলক! 📍')));
       return;
     }
 
@@ -438,22 +426,14 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
       User? user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
 
+      // সবাই ডিফল্টভাবে কাস্টমার হিসেবে জয়েন করবে
       Map<String, dynamic> userData = {
         'name': nameController.text.trim(), 
-        'phone': user.phoneNumber, // ফায়ারবেস অথ থেকে অরিজিনাল নাম্বার নেওয়া হলো
-        'role': selectedRole, 
-        'd_coins': 0, // নতুন ইউজারের কয়েন
+        'phone': user.phoneNumber, 
+        'role': 'customer', // 👈 ফিক্সড কাস্টমার
+        'd_coins': 0, 
         'created_at': FieldValue.serverTimestamp()
       };
-
-      if (selectedRole != 'customer') {
-        userData['latitude'] = vendorLocation!.latitude;
-        userData['longitude'] = vendorLocation!.longitude;
-        userData['status'] = 'pending'; 
-      }
-      if (selectedRole == 'seller') {
-        userData['shop_name'] = shopNameController.text.trim();
-      }
 
       await FirebaseFirestore.instance.collection('users').doc(user.uid).set(userData);
       
@@ -461,13 +441,9 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
       Navigator.pop(context); // close loading
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account Setup Complete! 🎉', style: TextStyle(color: Colors.white)), backgroundColor: Colors.green));
       
-      if (selectedRole == 'seller') {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const SellerMainScreen()));
-      } else if (selectedRole == 'rider') {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const RiderMainScreen()));
-      } else {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
-      }
+      // প্রোফাইল সেভ হওয়ার পর সরাসরি কাস্টমার মেইন স্ক্রিনে চলে যাবে
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainScreen()));
+      
     } catch (e) { 
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}'))); 
@@ -486,76 +462,33 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
-            Text('Verified Number: ${user?.phoneNumber ?? ''}', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+            const Icon(Icons.person_pin, size: 80, color: Colors.deepOrange),
+            const SizedBox(height: 20),
+            const Text('Welcome to D Shop!', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 5),
+            const Text('দয়া করে আপনার নাম দিয়ে প্রোফাইলটি সম্পূর্ণ করুন।', style: TextStyle(color: Colors.grey)),
+            const SizedBox(height: 30),
+
+            Text('Verified Number: ${user?.phoneNumber ?? ''}', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 16)),
             const SizedBox(height: 20),
 
-            const Text('Account Type', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 10),
-            Container(
-              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(10)),
-              padding: const EdgeInsets.all(5),
-              child: Row(
-                children:[
-                  _buildRoleOption('Customer', 'customer', Icons.person),
-                  _buildRoleOption('Seller', 'seller', Icons.storefront),
-                  _buildRoleOption('Rider', 'rider', Icons.motorcycle),
-                ],
-              ),
+            TextField(
+              controller: nameController, 
+              decoration: InputDecoration(labelText: 'Full Name', prefixIcon: const Icon(Icons.badge), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)))
+            ), 
+            const SizedBox(height: 40), 
+
+            SizedBox(
+              width: double.infinity, height: 50, 
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), 
+                onPressed: saveProfile, 
+                child: const Text('FINISH & GO TO DASHBOARD', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))
+              )
             ),
-            const SizedBox(height: 25),
-
-            TextField(controller: nameController, decoration: InputDecoration(labelText: 'Full Name', prefixIcon: const Icon(Icons.badge), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)))), 
-            const SizedBox(height: 15), 
-
-            if (selectedRole == 'seller') ...[
-              TextField(
-                controller: shopNameController, 
-                decoration: InputDecoration(labelText: 'Shop Name', prefixIcon: const Icon(Icons.store), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)))
-              ),
-              const SizedBox(height: 15),
-            ],
-
-            if (selectedRole != 'customer') ...[
-              Container(
-                padding: const EdgeInsets.all(15),
-                decoration: BoxDecoration(color: Colors.orange.shade50, border: Border.all(color: Colors.deepOrange.shade200), borderRadius: BorderRadius.circular(10)),
-                child: Row(
-                  children:[
-                    const Icon(Icons.location_on, color: Colors.deepOrange),
-                    const SizedBox(width: 10),
-                    Expanded(child: Text(vendorLocation == null ? 'Location is required for $selectedRole' : 'Location Saved Successfully ✅', style: TextStyle(color: vendorLocation == null ? Colors.black87 : Colors.green, fontWeight: FontWeight.bold))),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: vendorLocation == null ? Colors.deepOrange : Colors.green),
-                      onPressed: () async {
-                        LatLng? result = await Navigator.push(context, MaterialPageRoute(builder: (context) => const LocationPickerScreen()));
-                        if (result != null) setState(() { vendorLocation = result; });
-                      }, 
-                      child: Text(vendorLocation == null ? 'Set on Map' : 'Change', style: const TextStyle(color: Colors.white))
-                    )
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
-            ],
-
-            SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))), onPressed: saveProfile, child: const Text('FINISH & GO TO DASHBOARD', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)))),
           ]
         )
       )
-    );
-  }
-
-  Widget _buildRoleOption(String title, String role, IconData icon) {
-    bool isSelected = selectedRole == role;
-    return Expanded(
-      child: InkWell(
-        onTap: () => setState(() { selectedRole = role; vendorLocation = null; }),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(color: isSelected ? Colors.deepOrange : Colors.transparent, borderRadius: BorderRadius.circular(8), boxShadow: isSelected ?[const BoxShadow(color: Colors.black12, blurRadius: 5)] :[]),
-          child: Column(children:[Icon(icon, color: isSelected ? Colors.white : Colors.grey, size: 20), const SizedBox(height: 5), Text(title, style: TextStyle(color: isSelected ? Colors.white : Colors.grey, fontWeight: FontWeight.bold, fontSize: 12))]),
-        ),
-      ),
     );
   }
 }
